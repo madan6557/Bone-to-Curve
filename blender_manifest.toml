@@ -1,0 +1,12 @@
+schema_version = "1.0.0"
+id = "bone_to_curve"
+version = "1.0.0"
+name = "Bone to Curve"
+tagline = "Generate bone chains from active curve control points"
+maintainer = "madan6557"
+type = "add-on"
+tags = ["Rigging"]
+blender_version_min = "4.2.0"
+license = [
+    "SPDX:GPL-3.0-or-later",
+]
