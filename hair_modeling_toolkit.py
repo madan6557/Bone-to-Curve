@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Hair Modeling Toolkit",
     "author": "madan6557",
-    "version": (1, 1, 1),
+    "version": (1, 1, 2),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Hair Toolkit",
     "description": "Curve hair modeling tools and bone chain generation.",
@@ -430,17 +430,32 @@ def _reset_spline_path(context, curve_obj, spline):
     return _reset_spline_path_to_direction(context, curve_obj, spline, tip_world - root_world)
 
 
-def _reset_spline_path_x_axis(context, curve_obj, spline):
+def _flatten_spline_to_x_center(context, curve_obj, spline):
     endpoint_data = _path_endpoint_data(context, curve_obj, spline)
     if endpoint_data is None:
         return False
 
-    root_world, tip_world, _total_length, _path_points = endpoint_data
-    direction = Vector((1.0, 0.0, 0.0))
-    if (tip_world - root_world).dot(direction) < 0.0:
-        direction.negate()
+    _root_world, _tip_world, _total_length, path_points = endpoint_data
+    center_x = (min(point.x for point in path_points) + max(point.x for point in path_points)) * 0.5
+    matrix_world = curve_obj.matrix_world
+    matrix_inverted = matrix_world.inverted()
 
-    return _reset_spline_path_to_direction(context, curve_obj, spline, direction)
+    for point in _spline_points(spline):
+        world_co = matrix_world @ _point_local_co(point, spline)
+        world_co.x = center_x
+        _set_point_local_co(point, spline, matrix_inverted @ world_co)
+
+        if spline.type == "BEZIER":
+            handle_left = matrix_world @ point.handle_left
+            handle_right = matrix_world @ point.handle_right
+            handle_left.x = center_x
+            handle_right.x = center_x
+            point.handle_left = matrix_inverted @ handle_left
+            point.handle_right = matrix_inverted @ handle_right
+
+        _set_point_tilt(point, 0.0)
+
+    return True
 
 
 def _reverse_spline_direction(spline):
@@ -767,7 +782,7 @@ class HMT_OT_reset_path(bpy.types.Operator):
 class HMT_OT_reset_path_x_axis(bpy.types.Operator):
     bl_idname = "hair_modeling_toolkit.reset_path_x_axis"
     bl_label = "X Axis"
-    bl_description = "Straighten the active open curve along the global X axis"
+    bl_description = "Move all points to the curve X center while preserving Y and Z"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -781,15 +796,15 @@ class HMT_OT_reset_path_x_axis(bpy.types.Operator):
 
         changed_count = 0
         for spline in splines:
-            if _reset_spline_path_x_axis(context, curve_obj, spline):
+            if _flatten_spline_to_x_center(context, curve_obj, spline):
                 changed_count += 1
 
         if changed_count == 0:
-            self.report({"ERROR"}, "No valid open spline path could be straightened on X axis.")
+            self.report({"ERROR"}, "No valid open spline path could be centered on X axis.")
             return {"CANCELLED"}
 
         context.view_layer.update()
-        self.report({"INFO"}, f"Straightened {changed_count} curve splines on X axis.")
+        self.report({"INFO"}, f"Centered X for {changed_count} curve splines.")
         return {"FINISHED"}
 
 

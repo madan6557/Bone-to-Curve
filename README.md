@@ -21,7 +21,7 @@ Uninstall the old `Bone to Curve` extension before installing this version becau
 The panel is available at `View3D > Sidebar > Hair Toolkit`.
 
 - `Reset Path`: straightens open curve splines from root toward tip, preserves current evaluated path length, and resets twist.
-- `X Axis`: straightens open curve splines along the global X axis, preserves root and current evaluated path length, and resets twist.
+- `X Axis`: moves all open curve points to the curve X center while preserving each point's Y and Z position, then resets twist.
 - `Switch Direction`: reverses open curve spline direction.
 - `Origin To` Root, Tip, Center: moves the curve origin without moving the visible curve. Center uses the midpoint by evaluated path length.
 - `3D Cursor To` Root, Tip, Center: snaps the 3D cursor to the same curve positions.
