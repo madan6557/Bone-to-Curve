@@ -1,6 +1,6 @@
-# Bone to Curve
+# Hair Modeling Toolkit
 
-Blender addon for generating connected bone chains from the active curve path.
+Blender addon for curve-based hair modeling helpers and bone chain generation.
 
 ## Requirements
 
@@ -12,28 +12,38 @@ Blender addon for generating connected bone chains from the active curve path.
 1. Zip the repository files so `blender_manifest.toml` is at the zip root.
 2. In Blender, open `Edit > Preferences > Get Extensions`.
 3. Use `Install from Disk` and select the zip.
-4. Enable `Bone to Curve`.
+4. Enable `Hair Modeling Toolkit`.
 
-## Usage
+Uninstall the old `Bone to Curve` extension before installing this version because the extension id changed.
 
-1. Select one curve object.
-2. Open `View3D > Sidebar > Bone to Curve`.
-3. Click `Generate Bones From Active Curve`.
+## Curve Controls
 
-The addon creates a new armature in the same collection as the curve. Each spline with at least two usable control points becomes one connected bone chain.
+The panel is available at `View3D > Sidebar > Hair Toolkit`.
+
+- `Reset Path`: straightens open curve splines from root toward tip, preserves current evaluated path length, and resets twist.
+- `Switch Direction`: reverses open curve spline direction.
+- `Root`, `Tip`, `Center`: moves the curve origin without moving the visible curve. Center uses the midpoint by evaluated path length.
+
+Closed curve splines are protected from destructive edit operations.
+
+## Smooth / Reset
+
+- `Factor` and `Steps` control smoothing strength.
+- `Smooth Scale`: smooths curve point radius values.
+- `Smooth Curve`: smooths curve control point positions.
+- `Smooth Twist`: smooths curve point tilt values.
+- `Reset Scale`: sets curve point radius values to `1.0`.
+- `Reset Curve`: uses the same behavior as `Reset Path`.
+- `Reset Twist`: sets curve point tilt values to `0`.
+
+## Rigging
+
+`Generate Bones From Active Curve` creates a new armature in the same collection as the curve. Each spline with at least two usable control points becomes one connected bone chain.
 
 The number of bones follows the number of control points. Bone positions are resampled along Blender's evaluated curve path, so Bezier and NURBS path curves follow their visible shape instead of drawing straight lines between control points.
-
-## Naming
 
 For a single spline, the first bone uses the curve object name. Child bones append a three digit suffix to that full name.
 
 For multiple splines, each chain gets a stable spline suffix before the bone number, for example `Hair_spline.001`.
 
-## Notes
-
-- The addon uses control point count for bone count.
-- Bone positions follow the sampled curve path.
-- Supported curve primitives: Bezier, Circle, NURBS Curve, NURBS Circle, and Path.
-- Bone direction follows the curve point order.
-- The curve is not converted, deleted, parented, or constrained.
+Supported curve primitives: Bezier, Circle, NURBS Curve, NURBS Circle, and Path.
