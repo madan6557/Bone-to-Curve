@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Hair Modeling Toolkit",
     "author": "madan6557",
-    "version": (1, 2, 0),
+    "version": (1, 2, 1),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Hair Toolkit",
     "description": "Curve hair modeling tools and bone chain generation.",
@@ -557,6 +557,13 @@ def _reset_spline_tilt(spline):
         _set_point_tilt(point, 0.0)
 
 
+def _set_curve_twist_mode(curve_obj, twist_mode):
+    if hasattr(curve_obj.data, "twist_mode"):
+        curve_obj.data.twist_mode = twist_mode
+    if twist_mode == "Z_UP" and hasattr(curve_obj.data, "twist_smooth"):
+        curve_obj.data.twist_smooth = 0.0
+
+
 def _mirror_world_point_x(point, center_x=0.0):
     mirrored = point.copy()
     mirrored.x = center_x * 2.0 - mirrored.x
@@ -1094,6 +1101,50 @@ class HMT_OT_reset_twist(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class HMT_OT_lock_twist(bpy.types.Operator):
+    bl_idname = "hair_modeling_toolkit.lock_twist"
+    bl_label = "Lock Twist"
+    bl_description = "Use Z-Up twist mode to prevent unwanted automatic curve twist while preserving manual tilt"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_curve(context) is not None
+
+    def execute(self, context):
+        curve_obj = _active_curve(context)
+        if curve_obj is None:
+            self.report({"ERROR"}, "Active object must be a Curve.")
+            return {"CANCELLED"}
+
+        _set_curve_twist_mode(curve_obj, "Z_UP")
+        context.view_layer.update()
+        self.report({"INFO"}, "Locked automatic twist with Z-Up mode.")
+        return {"FINISHED"}
+
+
+class HMT_OT_unlock_twist(bpy.types.Operator):
+    bl_idname = "hair_modeling_toolkit.unlock_twist"
+    bl_label = "Unlock Twist"
+    bl_description = "Restore Blender's default minimum twist mode while preserving manual tilt"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_curve(context) is not None
+
+    def execute(self, context):
+        curve_obj = _active_curve(context)
+        if curve_obj is None:
+            self.report({"ERROR"}, "Active object must be a Curve.")
+            return {"CANCELLED"}
+
+        _set_curve_twist_mode(curve_obj, "MINIMUM")
+        context.view_layer.update()
+        self.report({"INFO"}, "Unlocked automatic twist with Minimum mode.")
+        return {"FINISHED"}
+
+
 class HMT_OT_duplicate_mirror_selected_curves(bpy.types.Operator):
     bl_idname = "hair_modeling_toolkit.duplicate_mirror_selected_curves"
     bl_label = "Duplicate Mirror"
@@ -1177,6 +1228,10 @@ class HMT_PT_tools(bpy.types.Panel):
         row.operator(HMT_OT_reset_path.bl_idname, text="Reset Curve")
         row.operator(HMT_OT_reset_twist.bl_idname)
 
+        row = smooth_box.row(align=True)
+        row.operator(HMT_OT_lock_twist.bl_idname)
+        row.operator(HMT_OT_unlock_twist.bl_idname)
+
         mirror_box = layout.box()
         mirror_box.label(text="Mirror", icon="MOD_MIRROR")
         mirror_box.operator(HMT_OT_duplicate_mirror_selected_curves.bl_idname)
@@ -1199,6 +1254,8 @@ classes = (
     HMT_OT_smooth_twist,
     HMT_OT_reset_scale,
     HMT_OT_reset_twist,
+    HMT_OT_lock_twist,
+    HMT_OT_unlock_twist,
     HMT_OT_duplicate_mirror_selected_curves,
     HMT_PT_tools,
 )

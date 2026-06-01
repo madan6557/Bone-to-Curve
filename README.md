@@ -37,6 +37,8 @@ Closed curve splines are protected from destructive edit operations.
 - `Reset Scale`: sets curve point radius values to `1.0`.
 - `Reset Curve`: uses the same behavior as `Reset Path`.
 - `Reset Twist`: sets curve point tilt values to `0`.
+- `Lock Twist`: uses Blender's Z-Up twist mode to prevent unwanted automatic twisting while preserving manual point tilt.
+- `Unlock Twist`: restores Blender's default Minimum twist mode while preserving manual point tilt.
 
 ## Mirror
 
