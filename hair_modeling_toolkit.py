@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Hair Modeling Toolkit",
     "author": "madan6557",
-    "version": (1, 3, 0),
+    "version": (1, 4, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Hair Toolkit",
     "description": "Curve hair modeling tools and bone chain generation.",
@@ -22,6 +22,7 @@ from mathutils import Quaternion, Vector
 MIN_BONE_LENGTH = 1.0e-6
 HMT_ENDPOINT_LOCKS_KEY = "hmt_endpoint_locks"
 _ENDPOINT_LOCK_HANDLER_RUNNING = False
+_RESOLUTION_BATCH_UPDATE_RUNNING = False
 
 
 def _unique_name(base_name, existing_names):
@@ -758,6 +759,119 @@ def _set_curve_fill_caps(curve_obj, enabled):
     return True
 
 
+def _collection_objects_recursive(collection):
+    if collection is None:
+        return []
+
+    objects = []
+    seen_collections = set()
+    seen_objects = set()
+
+    def visit(current_collection):
+        collection_key = current_collection.as_pointer()
+        if collection_key in seen_collections:
+            return
+
+        seen_collections.add(collection_key)
+        for obj in current_collection.objects:
+            object_key = obj.as_pointer()
+            if object_key not in seen_objects:
+                objects.append(obj)
+                seen_objects.add(object_key)
+
+        for child_collection in current_collection.children:
+            visit(child_collection)
+
+    visit(collection)
+    return objects
+
+
+def _resolution_batch_targets(collection):
+    curve_objects = [
+        obj
+        for obj in _collection_objects_recursive(collection)
+        if obj.type == "CURVE"
+    ]
+    bevel_reference_keys = {
+        obj.data.bevel_object.as_pointer()
+        for obj in curve_objects
+        if getattr(obj.data, "bevel_object", None) is not None
+        and obj.data.bevel_object.type == "CURVE"
+    }
+    path_curves = [
+        obj
+        for obj in curve_objects
+        if obj.as_pointer() not in bevel_reference_keys
+    ]
+    bevel_references = []
+    seen_references = set()
+
+    for obj in path_curves:
+        bevel_obj = getattr(obj.data, "bevel_object", None)
+        if bevel_obj is None or bevel_obj.type != "CURVE":
+            continue
+
+        reference_key = bevel_obj.as_pointer()
+        if reference_key in seen_references:
+            continue
+
+        bevel_references.append(bevel_obj)
+        seen_references.add(reference_key)
+
+    path_curves.sort(key=lambda obj: obj.name)
+    bevel_references.sort(key=lambda obj: obj.name)
+    return path_curves, bevel_references
+
+
+def _set_curve_data_resolution(curve_obj, value):
+    resolution = max(0, min(64, int(value)))
+    if hasattr(curve_obj.data, "resolution_u"):
+        curve_obj.data.resolution_u = resolution
+    if hasattr(curve_obj.data, "render_resolution_u"):
+        curve_obj.data.render_resolution_u = resolution
+
+
+def _apply_resolution_batch(settings, target):
+    collection = settings.resolution_collection
+    if collection is None:
+        return 0
+
+    path_curves, bevel_references = _resolution_batch_targets(collection)
+    target_objects = path_curves if target == "PATH" else bevel_references
+    value = settings.path_resolution if target == "PATH" else settings.bevel_reference_resolution
+
+    for obj in target_objects:
+        _set_curve_data_resolution(obj, value)
+
+    return len(target_objects)
+
+
+def _update_path_resolution(settings, _context):
+    global _RESOLUTION_BATCH_UPDATE_RUNNING
+
+    if _RESOLUTION_BATCH_UPDATE_RUNNING:
+        return
+
+    _RESOLUTION_BATCH_UPDATE_RUNNING = True
+    try:
+        _apply_resolution_batch(settings, "PATH")
+    finally:
+        _RESOLUTION_BATCH_UPDATE_RUNNING = False
+
+
+def _update_bevel_reference_resolution(settings, _context):
+    global _RESOLUTION_BATCH_UPDATE_RUNNING
+
+    if _RESOLUTION_BATCH_UPDATE_RUNNING:
+        return
+
+    _RESOLUTION_BATCH_UPDATE_RUNNING = True
+    try:
+        _apply_resolution_batch(settings, "BEVEL")
+    finally:
+        _RESOLUTION_BATCH_UPDATE_RUNNING = False
+
+
 def _point_world_co(curve_obj, spline, point):
     return curve_obj.matrix_world @ _point_local_co(point, spline)
 
@@ -1069,6 +1183,30 @@ class HMT_PG_settings(bpy.types.PropertyGroup):
         default=1,
         min=1,
         max=20,
+    )
+
+    resolution_collection: PointerProperty(
+        name="Collection",
+        description="Collection containing hair path curves",
+        type=bpy.types.Collection,
+    )
+
+    path_resolution: IntProperty(
+        name="Path Resolution",
+        description="Uniform viewport and render resolution for path curves in the collection",
+        default=2,
+        min=0,
+        max=64,
+        update=_update_path_resolution,
+    )
+
+    bevel_reference_resolution: IntProperty(
+        name="Bevel Reference Resolution",
+        description="Uniform viewport and render resolution for bevel reference curves used by the path collection",
+        default=2,
+        min=0,
+        max=64,
+        update=_update_bevel_reference_resolution,
     )
 
 
@@ -1565,6 +1703,27 @@ class HMT_OT_set_fill_caps(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class HMT_OT_refresh_resolution_batch(bpy.types.Operator):
+    bl_idname = "hair_modeling_toolkit.refresh_resolution_batch"
+    bl_label = "Refresh"
+    bl_description = "Refresh Resolution Batch target counts"
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        settings = context.scene.hair_modeling_toolkit
+        collection = settings.resolution_collection
+        if collection is None:
+            self.report({"WARNING"}, "Select a collection for Resolution Batch.")
+            return {"FINISHED"}
+
+        path_curves, bevel_references = _resolution_batch_targets(collection)
+        self.report(
+            {"INFO"},
+            f"Resolution Batch found {len(path_curves)} path curves and {len(bevel_references)} bevel references.",
+        )
+        return {"FINISHED"}
+
+
 class HMT_PT_tools(bpy.types.Panel):
     bl_label = "Hair Modeling Toolkit"
     bl_idname = "HMT_PT_tools"
@@ -1600,6 +1759,15 @@ class HMT_PT_tools(bpy.types.Panel):
         op.mode = "TIP"
         op = row.operator(HMT_OT_snap_cursor.bl_idname, text="Center")
         op.mode = "CENTER"
+
+        resolution_box = layout.box()
+        resolution_box.label(text="Resolution Batch", icon="OUTLINER_COLLECTION")
+        resolution_box.prop(settings, "resolution_collection")
+        path_curves, bevel_references = _resolution_batch_targets(settings.resolution_collection)
+        resolution_box.label(text=f"Paths: {len(path_curves)}  Bevel Refs: {len(bevel_references)}")
+        resolution_box.prop(settings, "path_resolution")
+        resolution_box.prop(settings, "bevel_reference_resolution")
+        resolution_box.operator(HMT_OT_refresh_resolution_batch.bl_idname)
 
         smooth_box = layout.box()
         smooth_box.label(text="Smooth / Reset", icon="MOD_SMOOTH")
@@ -1676,6 +1844,7 @@ classes = (
     HMT_OT_set_endpoint_lock,
     HMT_OT_duplicate_mirror_selected_curves,
     HMT_OT_set_fill_caps,
+    HMT_OT_refresh_resolution_batch,
     HMT_PT_tools,
 )
 

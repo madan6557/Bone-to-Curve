@@ -28,6 +28,14 @@ The panel is available at `View3D > Sidebar > Hair Toolkit`.
 
 Closed curve splines are protected from destructive edit operations.
 
+## Resolution Batch
+
+- `Collection`: registers a collection containing hair path curves. Child collections are included.
+- `Paths` and `Bevel Refs`: show how many path curves and bevel reference curves are currently detected.
+- `Path Resolution`: live updates `resolution_u` and `render_resolution_u` for every detected path curve.
+- `Bevel Reference Resolution`: live updates `resolution_u` and `render_resolution_u` for every unique curve used as a path bevel object.
+- `Refresh`: reports the current target counts without changing any resolution values.
+
 ## Smooth / Reset
 
 - `Factor` and `Steps` control smoothing strength.
