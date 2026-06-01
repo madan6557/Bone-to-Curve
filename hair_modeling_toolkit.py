@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Hair Modeling Toolkit",
     "author": "madan6557",
-    "version": (1, 2, 3),
+    "version": (1, 2, 4),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Hair Toolkit",
     "description": "Curve hair modeling tools and bone chain generation.",
@@ -195,6 +195,10 @@ def _selected_index_runs(spline):
         runs.append(current_run)
 
     return runs
+
+
+def _has_selected_points(splines):
+    return any(_selected_index_runs(spline) for spline in splines)
 
 
 def _reset_bezier_handles_for_indices(spline, indices):
@@ -1106,57 +1110,30 @@ class HMT_OT_smooth_curve(bpy.types.Operator):
             return {"CANCELLED"}
 
         settings = context.scene.hair_modeling_toolkit
+        selected_mode = _has_selected_points(splines)
+        changed_count = 0
+
         for spline in splines:
-            _smooth_spline_positions(spline, settings.smooth_factor, settings.smooth_steps)
-
-        context.view_layer.update()
-        self.report({"INFO"}, f"Smoothed curve for {len(splines)} splines.")
-        return {"FINISHED"}
-
-
-class HMT_OT_smooth_selected_curve(bpy.types.Operator):
-    bl_idname = "hair_modeling_toolkit.smooth_selected_curve"
-    bl_label = "Smooth Selected"
-    bl_description = "Smooth only selected curve points while keeping each selected range start and end fixed"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        return _active_curve(context) is not None
-
-    def execute(self, context):
-        curve_obj = _active_curve(context)
-        original_mode = curve_obj.mode if curve_obj is not None else "OBJECT"
-
-        try:
-            if curve_obj is not None and curve_obj.mode != "OBJECT":
-                bpy.ops.object.mode_set(mode="OBJECT")
-
-            curve_obj, splines = _require_editable_open_curve(self, context)
-            if curve_obj is None:
-                return {"CANCELLED"}
-
-            settings = context.scene.hair_modeling_toolkit
-            changed_count = 0
-            for spline in splines:
+            if selected_mode:
                 changed_count += _smooth_selected_spline_positions(
                     spline,
                     settings.smooth_factor,
                     settings.smooth_steps,
                 )
+            else:
+                _smooth_spline_positions(spline, settings.smooth_factor, settings.smooth_steps)
 
+        context.view_layer.update()
+        if selected_mode:
             if changed_count == 0:
                 self.report({"ERROR"}, "Select at least 3 contiguous curve points to smooth.")
                 return {"CANCELLED"}
 
-            context.view_layer.update()
             self.report({"INFO"}, f"Smoothed {changed_count} selected curve points.")
             return {"FINISHED"}
-        finally:
-            if curve_obj is not None and original_mode == "EDIT":
-                context.view_layer.objects.active = curve_obj
-                curve_obj.select_set(True)
-                bpy.ops.object.mode_set(mode="EDIT")
+
+        self.report({"INFO"}, f"Smoothed curve for {len(splines)} splines.")
+        return {"FINISHED"}
 
 
 class HMT_OT_smooth_twist(bpy.types.Operator):
@@ -1400,8 +1377,6 @@ class HMT_PT_tools(bpy.types.Panel):
         row = smooth_box.row(align=True)
         row.operator(HMT_OT_smooth_scale.bl_idname)
         row.operator(HMT_OT_smooth_curve.bl_idname)
-        row.operator(HMT_OT_smooth_selected_curve.bl_idname)
-        row = smooth_box.row(align=True)
         row.operator(HMT_OT_smooth_twist.bl_idname)
 
         row = smooth_box.row(align=True)
@@ -1443,7 +1418,6 @@ classes = (
     HMT_OT_snap_cursor,
     HMT_OT_smooth_scale,
     HMT_OT_smooth_curve,
-    HMT_OT_smooth_selected_curve,
     HMT_OT_smooth_twist,
     HMT_OT_reset_scale,
     HMT_OT_reset_twist,
