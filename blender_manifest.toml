@@ -1,8 +1,8 @@
 schema_version = "1.0.0"
 id = "bone_to_curve"
-version = "1.0.1"
+version = "1.0.2"
 name = "Bone to Curve"
-tagline = "Generate bone chains from active curve control points"
+tagline = "Generate bone chains along the active curve path"
 maintainer = "madan6557"
 type = "add-on"
 tags = ["Rigging"]

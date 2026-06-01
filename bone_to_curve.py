@@ -4,18 +4,20 @@
 bl_info = {
     "name": "Bone to Curve",
     "author": "madan6557",
-    "version": (1, 0, 1),
+    "version": (1, 0, 2),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Bone to Curve",
-    "description": "Generate connected bone chains from the active curve control points.",
+    "description": "Generate connected bone chains along the active curve path.",
     "category": "Rigging",
 }
 
 import bpy
 from mathutils import Vector
+from mathutils.geometry import interpolate_bezier
 
 
 MIN_BONE_LENGTH = 1.0e-6
+MIN_SAMPLES_PER_SEGMENT = 12
 
 
 def _unique_name(base_name, existing_names):
@@ -34,11 +36,52 @@ def _point_to_vector(point):
     return Vector((point.co[0], point.co[1], point.co[2]))
 
 
-def _spline_world_points(curve_obj, spline):
+def _control_point_count(spline):
+    if spline.type == "BEZIER":
+        return len(spline.bezier_points)
+    if spline.type in {"POLY", "NURBS"}:
+        return len(spline.points)
+    return 0
+
+
+def _sample_count(curve_obj, spline):
+    curve_resolution = max(1, int(getattr(curve_obj.data, "resolution_u", 12)))
+    spline_resolution = max(1, int(getattr(spline, "resolution_u", curve_resolution)))
+    return max(MIN_SAMPLES_PER_SEGMENT, curve_resolution, spline_resolution) + 1
+
+
+def _append_without_duplicate(points, new_points):
+    for point in new_points:
+        if points and (point - points[-1]).length <= MIN_BONE_LENGTH:
+            continue
+        points.append(point)
+
+
+def _spline_path_points(curve_obj, spline):
     matrix_world = curve_obj.matrix_world
 
     if spline.type == "BEZIER":
-        return [matrix_world @ point.co for point in spline.bezier_points]
+        bezier_points = spline.bezier_points
+        if len(bezier_points) < 2:
+            return []
+
+        path_points = []
+        segment_count = len(bezier_points) if spline.use_cyclic_u else len(bezier_points) - 1
+        samples_per_segment = _sample_count(curve_obj, spline)
+
+        for index in range(segment_count):
+            start = bezier_points[index]
+            end = bezier_points[(index + 1) % len(bezier_points)]
+            sampled_points = interpolate_bezier(
+                start.co,
+                start.handle_right,
+                end.handle_left,
+                end.co,
+                samples_per_segment,
+            )
+            _append_without_duplicate(path_points, [matrix_world @ point for point in sampled_points])
+
+        return path_points
 
     if spline.type in {"POLY", "NURBS"}:
         return [matrix_world @ _point_to_vector(point) for point in spline.points]
@@ -50,21 +93,63 @@ def _has_valid_segment(points):
     return any((points[index + 1] - points[index]).length > MIN_BONE_LENGTH for index in range(len(points) - 1))
 
 
+def _polyline_length(points):
+    return sum((points[index + 1] - points[index]).length for index in range(len(points) - 1))
+
+
+def _point_at_distance(points, distance):
+    walked_distance = 0.0
+
+    for index in range(len(points) - 1):
+        start = points[index]
+        end = points[index + 1]
+        segment_length = (end - start).length
+
+        if segment_length <= MIN_BONE_LENGTH:
+            continue
+
+        next_distance = walked_distance + segment_length
+        if distance <= next_distance:
+            factor = (distance - walked_distance) / segment_length
+            return start.lerp(end, factor)
+
+        walked_distance = next_distance
+
+    return points[-1]
+
+
+def _resample_path_by_bone_count(path_points, bone_count):
+    total_length = _polyline_length(path_points)
+    if total_length <= MIN_BONE_LENGTH:
+        return []
+
+    return [
+        _point_at_distance(path_points, total_length * index / bone_count)
+        for index in range(bone_count + 1)
+    ]
+
+
 def _collect_valid_chains(curve_obj):
     chains = []
     skipped_splines = 0
 
     for spline in curve_obj.data.splines:
-        points = _spline_world_points(curve_obj, spline)
-        if len(points) < 2:
+        control_count = _control_point_count(spline)
+        if control_count < 2:
             skipped_splines += 1
             continue
 
-        if not _has_valid_segment(points):
+        path_points = _spline_path_points(curve_obj, spline)
+        if len(path_points) < 2 or not _has_valid_segment(path_points):
             skipped_splines += 1
             continue
 
-        chains.append(points)
+        joints = _resample_path_by_bone_count(path_points, control_count)
+        if len(joints) < 2:
+            skipped_splines += 1
+            continue
+
+        chains.append(joints)
 
     return chains, skipped_splines
 

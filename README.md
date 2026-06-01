@@ -1,6 +1,6 @@
 # Bone to Curve
 
-Blender addon for generating connected bone chains from the active curve object's control points.
+Blender addon for generating connected bone chains from the active curve path.
 
 ## Requirements
 
@@ -22,6 +22,8 @@ Blender addon for generating connected bone chains from the active curve object'
 
 The addon creates a new armature in the same collection as the curve. Each spline with at least two usable control points becomes one connected bone chain.
 
+The number of bones follows the number of control points. Bone positions are resampled along the curve path, so the chain follows the curve shape instead of drawing straight lines between control points.
+
 ## Naming
 
 For a single spline, the first bone uses the curve object name. Child bones append a three digit suffix to that full name.
@@ -30,6 +32,7 @@ For multiple splines, each chain gets a stable spline suffix before the bone num
 
 ## Notes
 
-- The addon uses curve control points, not evaluated samples.
+- The addon uses control point count for bone count.
+- Bone positions follow the sampled curve path.
 - Bone direction follows the curve point order.
 - The curve is not converted, deleted, parented, or constrained.
