@@ -4,19 +4,24 @@
 bl_info = {
     "name": "Hair Modeling Toolkit",
     "author": "madan6557",
-    "version": (1, 2, 4),
+    "version": (1, 3, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Hair Toolkit",
     "description": "Curve hair modeling tools and bone chain generation.",
     "category": "Curve",
 }
 
+import json
+
 import bpy
-from bpy.props import FloatProperty, IntProperty, PointerProperty
-from mathutils import Vector
+from bpy.app.handlers import persistent
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty
+from mathutils import Quaternion, Vector
 
 
 MIN_BONE_LENGTH = 1.0e-6
+HMT_ENDPOINT_LOCKS_KEY = "hmt_endpoint_locks"
+_ENDPOINT_LOCK_HANDLER_RUNNING = False
 
 
 def _unique_name(base_name, existing_names):
@@ -447,6 +452,17 @@ def _resample_path_by_bone_count(path_points, bone_count):
     ]
 
 
+def _resample_path_by_point_count(path_points, point_count):
+    total_length = _polyline_length(path_points)
+    if total_length <= MIN_BONE_LENGTH or point_count < 2:
+        return []
+
+    return [
+        _point_at_distance(path_points, total_length * index / (point_count - 1))
+        for index in range(point_count)
+    ]
+
+
 def _path_endpoint_data(context, curve_obj, spline):
     path_points = _evaluated_spline_path_points(context, curve_obj, spline)
     if len(path_points) < 2:
@@ -636,6 +652,97 @@ def _reset_spline_tilt(spline):
         _set_point_tilt(point, 0.0)
 
 
+def _path_tangents(points):
+    tangents = []
+    fallback = Vector((0.0, 1.0, 0.0))
+
+    for index in range(len(points)):
+        if index == 0:
+            tangent = points[1] - points[0]
+        elif index == len(points) - 1:
+            tangent = points[-1] - points[-2]
+        else:
+            tangent = points[index + 1] - points[index - 1]
+
+        if tangent.length <= MIN_BONE_LENGTH:
+            tangent = tangents[-1].copy() if tangents else fallback.copy()
+        else:
+            tangent.normalize()
+
+        tangents.append(tangent)
+
+    return tangents
+
+
+def _project_normal(preferred_normal, tangent):
+    normal = preferred_normal - tangent * preferred_normal.dot(tangent)
+    if normal.length > MIN_BONE_LENGTH:
+        normal.normalize()
+        return normal
+
+    for fallback in (Vector((0.0, 0.0, 1.0)), Vector((0.0, 1.0, 0.0)), Vector((1.0, 0.0, 0.0))):
+        normal = fallback - tangent * fallback.dot(tangent)
+        if normal.length > MIN_BONE_LENGTH:
+            normal.normalize()
+            return normal
+
+    return tangent.orthogonal().normalized()
+
+
+def _minimum_twist_normals(tangents):
+    normals = [_project_normal(Vector((0.0, 0.0, 1.0)), tangents[0])]
+
+    for index in range(1, len(tangents)):
+        previous_tangent = tangents[index - 1]
+        tangent = tangents[index]
+        normal = normals[-1]
+        axis = previous_tangent.cross(tangent)
+
+        if axis.length > MIN_BONE_LENGTH:
+            axis.normalize()
+            normal = Quaternion(axis, previous_tangent.angle(tangent, 0.0)) @ normal
+
+        normals.append(_project_normal(normal, tangent))
+
+    return normals
+
+
+def _signed_angle_around_axis(source, target, axis):
+    source = _project_normal(source, axis)
+    target = _project_normal(target, axis)
+    angle = source.angle(target, 0.0)
+    if axis.dot(source.cross(target)) < 0.0:
+        return -angle
+    return angle
+
+
+def _bake_current_twist_to_z_up(context, curve_obj):
+    current_mode = getattr(curve_obj.data, "twist_mode", "MINIMUM")
+    changed = False
+
+    for spline in _editable_splines(curve_obj):
+        point_count = _control_point_count(spline)
+        path_points = _evaluated_spline_path_points(context, curve_obj, spline)
+        sampled_points = _resample_path_by_point_count(path_points, point_count)
+        if len(sampled_points) != point_count:
+            continue
+
+        tangents = _path_tangents(sampled_points)
+        z_up_normals = [_project_normal(Vector((0.0, 0.0, 1.0)), tangent) for tangent in tangents]
+        minimum_normals = _minimum_twist_normals(tangents)
+        current_normals = z_up_normals if current_mode == "Z_UP" else minimum_normals
+
+        for point, tangent, z_up_normal, current_normal in zip(_spline_points(spline), tangents, z_up_normals, current_normals):
+            delta = _signed_angle_around_axis(z_up_normal, current_normal, tangent)
+            _set_point_tilt(point, _point_tilt(point) + delta)
+        changed = True
+
+    if changed:
+        _set_curve_twist_mode(curve_obj, "Z_UP")
+
+    return changed
+
+
 def _set_curve_twist_mode(curve_obj, twist_mode):
     if hasattr(curve_obj.data, "twist_mode"):
         curve_obj.data.twist_mode = twist_mode
@@ -649,6 +756,92 @@ def _set_curve_fill_caps(curve_obj, enabled):
 
     curve_obj.data.use_fill_caps = enabled
     return True
+
+
+def _point_world_co(curve_obj, spline, point):
+    return curve_obj.matrix_world @ _point_local_co(point, spline)
+
+
+def _move_point_to_world(curve_obj, spline, point, world_position):
+    old_local = _point_local_co(point, spline)
+    new_local = curve_obj.matrix_world.inverted() @ Vector(world_position)
+    delta = new_local - old_local
+    _set_point_local_co(point, spline, new_local)
+
+    if spline.type == "BEZIER":
+        point.handle_left += delta
+        point.handle_right += delta
+
+
+def _endpoint_lock_data(curve_obj):
+    raw_data = curve_obj.get(HMT_ENDPOINT_LOCKS_KEY, "{}")
+    try:
+        data = json.loads(raw_data)
+    except (TypeError, ValueError):
+        data = {}
+
+    if not isinstance(data, dict):
+        data = {}
+
+    data.setdefault("root", [])
+    data.setdefault("tip", [])
+    return data
+
+
+def _store_endpoint_lock_positions(curve_obj, mode, enabled):
+    curve_obj[f"hmt_lock_{mode.lower()}"] = enabled
+    data = _endpoint_lock_data(curve_obj)
+    splines = _editable_splines(curve_obj)
+
+    if enabled:
+        endpoint_positions = []
+        for spline in splines:
+            points = _spline_points(spline)
+            point = points[0] if mode == "ROOT" else points[-1]
+            endpoint_positions.append(list(_point_world_co(curve_obj, spline, point)))
+        data[mode.lower()] = endpoint_positions
+
+    curve_obj[HMT_ENDPOINT_LOCKS_KEY] = json.dumps(data)
+
+
+def _apply_endpoint_locks_to_curve(curve_obj):
+    if curve_obj.type != "CURVE":
+        return False
+    if _has_closed_spline(curve_obj):
+        return False
+
+    lock_root = bool(curve_obj.get("hmt_lock_root", False))
+    lock_tip = bool(curve_obj.get("hmt_lock_tip", False))
+    if not lock_root and not lock_tip:
+        return False
+
+    data = _endpoint_lock_data(curve_obj)
+    splines = _editable_splines(curve_obj)
+
+    for index, spline in enumerate(splines):
+        points = _spline_points(spline)
+        if lock_root and index < len(data["root"]):
+            _move_point_to_world(curve_obj, spline, points[0], data["root"][index])
+        if lock_tip and index < len(data["tip"]):
+            _move_point_to_world(curve_obj, spline, points[-1], data["tip"][index])
+
+    return True
+
+
+@persistent
+def _hmt_endpoint_lock_handler(_scene, _depsgraph):
+    global _ENDPOINT_LOCK_HANDLER_RUNNING
+
+    if _ENDPOINT_LOCK_HANDLER_RUNNING:
+        return
+
+    _ENDPOINT_LOCK_HANDLER_RUNNING = True
+    try:
+        for obj in bpy.data.objects:
+            if obj.type == "CURVE":
+                _apply_endpoint_locks_to_curve(obj)
+    finally:
+        _ENDPOINT_LOCK_HANDLER_RUNNING = False
 
 
 def _mirror_world_point_x(point, center_x=0.0):
@@ -1209,7 +1402,7 @@ class HMT_OT_reset_twist(bpy.types.Operator):
 class HMT_OT_lock_twist(bpy.types.Operator):
     bl_idname = "hair_modeling_toolkit.lock_twist"
     bl_label = "Lock Twist"
-    bl_description = "Use Z-Up twist mode to prevent unwanted automatic curve twist while preserving manual tilt"
+    bl_description = "Bake the current twist state into point tilt, then use Z-Up twist mode"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -1222,9 +1415,12 @@ class HMT_OT_lock_twist(bpy.types.Operator):
             self.report({"ERROR"}, "Active object must be a Curve.")
             return {"CANCELLED"}
 
-        _set_curve_twist_mode(curve_obj, "Z_UP")
+        if not _bake_current_twist_to_z_up(context, curve_obj):
+            self.report({"ERROR"}, "Active curve has no editable spline with at least 2 points.")
+            return {"CANCELLED"}
+
         context.view_layer.update()
-        self.report({"INFO"}, "Locked automatic twist with Z-Up mode.")
+        self.report({"INFO"}, "Locked current twist state.")
         return {"FINISHED"}
 
 
@@ -1247,6 +1443,42 @@ class HMT_OT_unlock_twist(bpy.types.Operator):
         _set_curve_twist_mode(curve_obj, "MINIMUM")
         context.view_layer.update()
         self.report({"INFO"}, "Unlocked automatic twist with Minimum mode.")
+        return {"FINISHED"}
+
+
+class HMT_OT_set_endpoint_lock(bpy.types.Operator):
+    bl_idname = "hair_modeling_toolkit.set_endpoint_lock"
+    bl_label = "Set Endpoint Lock"
+    bl_description = "Lock or unlock a curve endpoint at its current world position"
+    bl_options = {"REGISTER", "UNDO"}
+
+    mode: EnumProperty(
+        name="Endpoint",
+        items=(
+            ("ROOT", "Root", "Use the first control point in each spline"),
+            ("TIP", "Tip", "Use the last control point in each spline"),
+        ),
+        default="ROOT",
+    )
+    enabled: BoolProperty(name="Enabled", default=True)
+
+    @classmethod
+    def poll(cls, context):
+        return _active_curve(context) is not None
+
+    def execute(self, context):
+        curve_obj, splines = _require_editable_open_curve(self, context)
+        if curve_obj is None:
+            return {"CANCELLED"}
+
+        context.view_layer.update()
+        _store_endpoint_lock_positions(curve_obj, self.mode, self.enabled)
+        _apply_endpoint_locks_to_curve(curve_obj)
+        context.view_layer.update()
+
+        endpoint_name = "root" if self.mode == "ROOT" else "tip"
+        state = "Locked" if self.enabled else "Unlocked"
+        self.report({"INFO"}, f"{state} {endpoint_name} endpoint for {len(splines)} splines.")
         return {"FINISHED"}
 
 
@@ -1384,9 +1616,27 @@ class HMT_PT_tools(bpy.types.Panel):
         row.operator(HMT_OT_reset_path.bl_idname, text="Reset Curve")
         row.operator(HMT_OT_reset_twist.bl_idname)
 
-        row = smooth_box.row(align=True)
+        lock_box = layout.box()
+        lock_box.label(text="Locks")
+        row = lock_box.row(align=True)
         row.operator(HMT_OT_lock_twist.bl_idname)
         row.operator(HMT_OT_unlock_twist.bl_idname)
+
+        row = lock_box.row(align=True)
+        op = row.operator(HMT_OT_set_endpoint_lock.bl_idname, text="Lock Root")
+        op.mode = "ROOT"
+        op.enabled = True
+        op = row.operator(HMT_OT_set_endpoint_lock.bl_idname, text="Unlock Root")
+        op.mode = "ROOT"
+        op.enabled = False
+
+        row = lock_box.row(align=True)
+        op = row.operator(HMT_OT_set_endpoint_lock.bl_idname, text="Lock Tip")
+        op.mode = "TIP"
+        op.enabled = True
+        op = row.operator(HMT_OT_set_endpoint_lock.bl_idname, text="Unlock Tip")
+        op.mode = "TIP"
+        op.enabled = False
 
         mirror_box = layout.box()
         mirror_box.label(text="Mirror", icon="MOD_MIRROR")
@@ -1423,6 +1673,7 @@ classes = (
     HMT_OT_reset_twist,
     HMT_OT_lock_twist,
     HMT_OT_unlock_twist,
+    HMT_OT_set_endpoint_lock,
     HMT_OT_duplicate_mirror_selected_curves,
     HMT_OT_set_fill_caps,
     HMT_PT_tools,
@@ -1433,9 +1684,13 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.hair_modeling_toolkit = PointerProperty(type=HMT_PG_settings)
+    if _hmt_endpoint_lock_handler not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(_hmt_endpoint_lock_handler)
 
 
 def unregister():
+    if _hmt_endpoint_lock_handler in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(_hmt_endpoint_lock_handler)
     del bpy.types.Scene.hair_modeling_toolkit
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
