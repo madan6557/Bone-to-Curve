@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Hair Modeling Toolkit",
     "author": "madan6557",
-    "version": (1, 1, 2),
+    "version": (1, 2, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Hair Toolkit",
     "description": "Curve hair modeling tools and bone chain generation.",
@@ -29,6 +29,27 @@ def _unique_name(base_name, existing_names):
         if candidate not in existing_names:
             return candidate
         index += 1
+
+
+def _mirror_side_name(name):
+    replacements = (
+        (".L", ".R"),
+        (".R", ".L"),
+        ("_L", "_R"),
+        ("_R", "_L"),
+        ("-L", "-R"),
+        ("-R", "-L"),
+        ("Left", "Right"),
+        ("Right", "Left"),
+        ("left", "right"),
+        ("right", "left"),
+    )
+
+    for source, target in replacements:
+        if source in name:
+            return name.replace(source, target)
+
+    return f"{name}_mirror"
 
 
 def _control_point_count(spline):
@@ -536,6 +557,59 @@ def _reset_spline_tilt(spline):
         _set_point_tilt(point, 0.0)
 
 
+def _mirror_world_point_x(point, center_x=0.0):
+    mirrored = point.copy()
+    mirrored.x = center_x * 2.0 - mirrored.x
+    return mirrored
+
+
+def _mirror_point_to_object(source_obj, target_obj, point, spline):
+    world_point = source_obj.matrix_world @ _point_local_co(point, spline)
+    _set_point_local_co(point, spline, target_obj.matrix_world.inverted() @ _mirror_world_point_x(world_point))
+
+
+def _mirror_bezier_handles_to_object(source_obj, target_obj, point):
+    target_matrix_inverted = target_obj.matrix_world.inverted()
+    left_world = source_obj.matrix_world @ point.handle_left
+    right_world = source_obj.matrix_world @ point.handle_right
+    point.handle_left = target_matrix_inverted @ _mirror_world_point_x(left_world)
+    point.handle_right = target_matrix_inverted @ _mirror_world_point_x(right_world)
+
+
+def _mirror_curve_data_x(source_obj, target_obj):
+    for spline in target_obj.data.splines:
+        if not _is_supported_spline(spline):
+            continue
+
+        for point in _spline_points(spline):
+            _mirror_point_to_object(source_obj, target_obj, point, spline)
+            _set_point_tilt(point, -_point_tilt(point))
+
+            if spline.type == "BEZIER":
+                _mirror_bezier_handles_to_object(source_obj, target_obj, point)
+
+
+def _duplicate_mirror_curve(context, source_obj):
+    mirrored_name = _unique_name(_mirror_side_name(source_obj.name), bpy.data.objects.keys())
+    mirrored_data_name = _unique_name(_mirror_side_name(source_obj.data.name), bpy.data.curves.keys())
+
+    target_data = source_obj.data.copy()
+    target_data.name = mirrored_data_name
+
+    target_obj = source_obj.copy()
+    target_obj.data = target_data
+    target_obj.animation_data_clear()
+    target_obj.name = mirrored_name
+    target_obj.matrix_world = source_obj.matrix_world.copy()
+    target_obj.matrix_world.translation = _mirror_world_point_x(source_obj.matrix_world.translation)
+
+    target_collection = _link_target_collection(context, source_obj)
+    target_collection.objects.link(target_obj)
+
+    _mirror_curve_data_x(source_obj, target_obj)
+    return target_obj
+
+
 def _origin_target_world(context, curve_obj, mode):
     splines = _editable_splines(curve_obj)
     if not splines:
@@ -1020,6 +1094,38 @@ class HMT_OT_reset_twist(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class HMT_OT_duplicate_mirror_selected_curves(bpy.types.Operator):
+    bl_idname = "hair_modeling_toolkit.duplicate_mirror_selected_curves"
+    bl_label = "Duplicate Mirror"
+    bl_description = "Duplicate selected curves and mirror them across global X center"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return any(obj.type == "CURVE" for obj in context.selected_objects)
+
+    def execute(self, context):
+        source_curves = [obj for obj in context.selected_objects if obj.type == "CURVE"]
+        if not source_curves:
+            self.report({"ERROR"}, "Select at least one Curve object.")
+            return {"CANCELLED"}
+
+        context.view_layer.update()
+        mirrored_objects = []
+        for source_obj in source_curves:
+            mirrored_objects.append(_duplicate_mirror_curve(context, source_obj))
+
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        for obj in mirrored_objects:
+            obj.select_set(True)
+
+        context.view_layer.objects.active = mirrored_objects[-1]
+        context.view_layer.update()
+        self.report({"INFO"}, f"Created {len(mirrored_objects)} mirrored curve duplicates.")
+        return {"FINISHED"}
+
+
 class HMT_PT_tools(bpy.types.Panel):
     bl_label = "Hair Modeling Toolkit"
     bl_idname = "HMT_PT_tools"
@@ -1071,6 +1177,10 @@ class HMT_PT_tools(bpy.types.Panel):
         row.operator(HMT_OT_reset_path.bl_idname, text="Reset Curve")
         row.operator(HMT_OT_reset_twist.bl_idname)
 
+        mirror_box = layout.box()
+        mirror_box.label(text="Mirror", icon="MOD_MIRROR")
+        mirror_box.operator(HMT_OT_duplicate_mirror_selected_curves.bl_idname)
+
         rigging_box = layout.box()
         rigging_box.label(text="Rigging", icon="ARMATURE_DATA")
         rigging_box.operator(HMT_OT_generate_bones_from_active_curve.bl_idname, icon="ARMATURE_DATA")
@@ -1089,6 +1199,7 @@ classes = (
     HMT_OT_smooth_twist,
     HMT_OT_reset_scale,
     HMT_OT_reset_twist,
+    HMT_OT_duplicate_mirror_selected_curves,
     HMT_PT_tools,
 )
 
