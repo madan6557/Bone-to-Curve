@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Hair Modeling Toolkit",
     "author": "madan6557",
-    "version": (1, 2, 2),
+    "version": (1, 2, 3),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Hair Toolkit",
     "description": "Curve hair modeling tools and bone chain generation.",
@@ -637,6 +637,14 @@ def _set_curve_twist_mode(curve_obj, twist_mode):
         curve_obj.data.twist_mode = twist_mode
     if twist_mode == "Z_UP" and hasattr(curve_obj.data, "twist_smooth"):
         curve_obj.data.twist_smooth = 0.0
+
+
+def _set_curve_fill_caps(curve_obj, enabled):
+    if not hasattr(curve_obj.data, "use_fill_caps"):
+        return False
+
+    curve_obj.data.use_fill_caps = enabled
+    return True
 
 
 def _mirror_world_point_x(point, center_x=0.0):
@@ -1297,6 +1305,57 @@ class HMT_OT_duplicate_mirror_selected_curves(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class HMT_OT_set_fill_caps(bpy.types.Operator):
+    bl_idname = "hair_modeling_toolkit.set_fill_caps"
+    bl_label = "Close Ends"
+    bl_description = "Close curve geometry caps without changing point radius scale"
+    bl_options = {"REGISTER", "UNDO"}
+
+    mode: bpy.props.EnumProperty(
+        name="Mode",
+        items=(
+            ("ROOT", "Root", "Close caps for the root side"),
+            ("TIP", "Tip", "Close caps for the tip side"),
+            ("BOTH", "Ends", "Close caps for both ends"),
+            ("OPEN", "Open", "Open curve caps"),
+        ),
+        default="BOTH",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return _active_curve(context) is not None
+
+    def execute(self, context):
+        curve_obj = _active_curve(context)
+        if curve_obj is None:
+            self.report({"ERROR"}, "Active object must be a Curve.")
+            return {"CANCELLED"}
+
+        if self.mode == "OPEN":
+            curve_obj["hmt_cap_root"] = False
+            curve_obj["hmt_cap_tip"] = False
+        elif self.mode == "ROOT":
+            curve_obj["hmt_cap_root"] = True
+        elif self.mode == "TIP":
+            curve_obj["hmt_cap_tip"] = True
+        else:
+            curve_obj["hmt_cap_root"] = True
+            curve_obj["hmt_cap_tip"] = True
+
+        enabled = bool(curve_obj.get("hmt_cap_root", False) or curve_obj.get("hmt_cap_tip", False))
+        if not _set_curve_fill_caps(curve_obj, enabled):
+            self.report({"ERROR"}, "Active curve does not support fill caps.")
+            return {"CANCELLED"}
+
+        context.view_layer.update()
+        if self.mode == "OPEN":
+            self.report({"INFO"}, "Opened curve caps.")
+        else:
+            self.report({"INFO"}, "Closed curve caps without changing point scale.")
+        return {"FINISHED"}
+
+
 class HMT_PT_tools(bpy.types.Panel):
     bl_label = "Hair Modeling Toolkit"
     bl_idname = "HMT_PT_tools"
@@ -1358,6 +1417,17 @@ class HMT_PT_tools(bpy.types.Panel):
         mirror_box.label(text="Mirror", icon="MOD_MIRROR")
         mirror_box.operator(HMT_OT_duplicate_mirror_selected_curves.bl_idname)
 
+        caps_box = layout.box()
+        caps_box.label(text="Caps", icon="MESH_DATA")
+        row = caps_box.row(align=True)
+        op = row.operator(HMT_OT_set_fill_caps.bl_idname, text="Root")
+        op.mode = "ROOT"
+        op = row.operator(HMT_OT_set_fill_caps.bl_idname, text="Tip")
+        op.mode = "TIP"
+        op = row.operator(HMT_OT_set_fill_caps.bl_idname, text="Ends")
+        op.mode = "BOTH"
+        caps_box.operator(HMT_OT_set_fill_caps.bl_idname, text="Open Caps").mode = "OPEN"
+
         rigging_box = layout.box()
         rigging_box.label(text="Rigging", icon="ARMATURE_DATA")
         rigging_box.operator(HMT_OT_generate_bones_from_active_curve.bl_idname, icon="ARMATURE_DATA")
@@ -1380,6 +1450,7 @@ classes = (
     HMT_OT_lock_twist,
     HMT_OT_unlock_twist,
     HMT_OT_duplicate_mirror_selected_curves,
+    HMT_OT_set_fill_caps,
     HMT_PT_tools,
 )
 
