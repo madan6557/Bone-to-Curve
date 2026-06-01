@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Bone to Curve",
     "author": "madan6557",
-    "version": (1, 0, 2),
+    "version": (1, 0, 3),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Bone to Curve",
     "description": "Generate connected bone chains along the active curve path.",
@@ -12,12 +12,9 @@ bl_info = {
 }
 
 import bpy
-from mathutils import Vector
-from mathutils.geometry import interpolate_bezier
 
 
 MIN_BONE_LENGTH = 1.0e-6
-MIN_SAMPLES_PER_SEGMENT = 12
 
 
 def _unique_name(base_name, existing_names):
@@ -32,10 +29,6 @@ def _unique_name(base_name, existing_names):
         index += 1
 
 
-def _point_to_vector(point):
-    return Vector((point.co[0], point.co[1], point.co[2]))
-
-
 def _control_point_count(spline):
     if spline.type == "BEZIER":
         return len(spline.bezier_points)
@@ -44,49 +37,171 @@ def _control_point_count(spline):
     return 0
 
 
-def _sample_count(curve_obj, spline):
-    curve_resolution = max(1, int(getattr(curve_obj.data, "resolution_u", 12)))
-    spline_resolution = max(1, int(getattr(spline, "resolution_u", curve_resolution)))
-    return max(MIN_SAMPLES_PER_SEGMENT, curve_resolution, spline_resolution) + 1
+def _copy_attr(source, target, name):
+    if hasattr(source, name) and hasattr(target, name):
+        try:
+            setattr(target, name, getattr(source, name))
+        except TypeError:
+            pass
 
 
-def _append_without_duplicate(points, new_points):
-    for point in new_points:
-        if points and (point - points[-1]).length <= MIN_BONE_LENGTH:
+def _copy_curve_settings(source_curve, target_curve):
+    for attr_name in (
+        "dimensions",
+        "resolution_u",
+        "render_resolution_u",
+        "twist_mode",
+        "twist_smooth",
+        "use_path",
+        "path_duration",
+    ):
+        _copy_attr(source_curve, target_curve, attr_name)
+
+    target_curve.bevel_depth = 0.0
+    target_curve.bevel_resolution = 0
+    target_curve.extrude = 0.0
+    target_curve.offset = 0.0
+    target_curve.bevel_object = None
+    target_curve.taper_object = None
+
+
+def _copy_bezier_point(source_point, target_point):
+    for attr_name in (
+        "co",
+        "handle_left",
+        "handle_right",
+        "handle_left_type",
+        "handle_right_type",
+        "tilt",
+        "radius",
+        "weight_softbody",
+    ):
+        _copy_attr(source_point, target_point, attr_name)
+
+
+def _copy_curve_point(source_point, target_point):
+    for attr_name in ("co", "tilt", "radius", "weight_softbody"):
+        _copy_attr(source_point, target_point, attr_name)
+
+
+def _copy_spline(source_spline, target_curve):
+    target_spline = target_curve.splines.new(source_spline.type)
+
+    if source_spline.type == "BEZIER":
+        point_count = len(source_spline.bezier_points)
+        target_spline.bezier_points.add(point_count - 1)
+        for source_point, target_point in zip(source_spline.bezier_points, target_spline.bezier_points):
+            _copy_bezier_point(source_point, target_point)
+    else:
+        point_count = len(source_spline.points)
+        target_spline.points.add(point_count - 1)
+        for source_point, target_point in zip(source_spline.points, target_spline.points):
+            _copy_curve_point(source_point, target_point)
+
+    for attr_name in (
+        "resolution_u",
+        "order_u",
+        "use_endpoint_u",
+        "use_bezier_u",
+        "use_cyclic_u",
+        "use_smooth",
+    ):
+        _copy_attr(source_spline, target_spline, attr_name)
+
+    return target_spline
+
+
+def _component_paths_from_mesh(mesh, matrix_world):
+    if not mesh.vertices:
+        return []
+
+    adjacency = {index: [] for index in range(len(mesh.vertices))}
+    for edge in mesh.edges:
+        first, second = edge.vertices
+        adjacency[first].append(second)
+        adjacency[second].append(first)
+
+    if not mesh.edges:
+        return [[matrix_world @ vertex.co for vertex in mesh.vertices]]
+
+    visited_vertices = set()
+    paths = []
+
+    for start_index in range(len(mesh.vertices)):
+        if start_index in visited_vertices:
             continue
-        points.append(point)
+
+        stack = [start_index]
+        component = set()
+        while stack:
+            vertex_index = stack.pop()
+            if vertex_index in component:
+                continue
+            component.add(vertex_index)
+            stack.extend(adjacency[vertex_index])
+
+        visited_vertices.update(component)
+        endpoints = [index for index in component if len(adjacency[index]) <= 1]
+        current = min(endpoints or component)
+        previous = None
+        ordered_indices = [current]
+        visited_edges = set()
+
+        while True:
+            next_index = None
+            for neighbor in sorted(adjacency[current]):
+                edge_key = tuple(sorted((current, neighbor)))
+                if neighbor == previous or edge_key in visited_edges:
+                    continue
+                next_index = neighbor
+                visited_edges.add(edge_key)
+                break
+
+            if next_index is None:
+                break
+
+            previous = current
+            current = next_index
+            ordered_indices.append(current)
+
+            if current == ordered_indices[0]:
+                break
+
+        paths.append([matrix_world @ mesh.vertices[index].co for index in ordered_indices])
+
+    return sorted(paths, key=lambda path: len(path), reverse=True)
 
 
-def _spline_path_points(curve_obj, spline):
-    matrix_world = curve_obj.matrix_world
+def _evaluated_spline_path_points(context, curve_obj, spline):
+    temp_curve = bpy.data.curves.new(f"{curve_obj.name}_path_eval", "CURVE")
+    temp_obj = None
+    eval_obj = None
 
-    if spline.type == "BEZIER":
-        bezier_points = spline.bezier_points
-        if len(bezier_points) < 2:
+    try:
+        _copy_curve_settings(curve_obj.data, temp_curve)
+        _copy_spline(spline, temp_curve)
+
+        temp_obj = bpy.data.objects.new(f"{curve_obj.name}_path_eval", temp_curve)
+        temp_obj.matrix_world = curve_obj.matrix_world.copy()
+        _link_target_collection(context, curve_obj).objects.link(temp_obj)
+        context.view_layer.update()
+
+        depsgraph = context.evaluated_depsgraph_get()
+        eval_obj = temp_obj.evaluated_get(depsgraph)
+        mesh = eval_obj.to_mesh()
+        try:
+            paths = _component_paths_from_mesh(mesh, temp_obj.matrix_world)
+        finally:
+            eval_obj.to_mesh_clear()
+
+        if not paths:
             return []
 
-        path_points = []
-        segment_count = len(bezier_points) if spline.use_cyclic_u else len(bezier_points) - 1
-        samples_per_segment = _sample_count(curve_obj, spline)
-
-        for index in range(segment_count):
-            start = bezier_points[index]
-            end = bezier_points[(index + 1) % len(bezier_points)]
-            sampled_points = interpolate_bezier(
-                start.co,
-                start.handle_right,
-                end.handle_left,
-                end.co,
-                samples_per_segment,
-            )
-            _append_without_duplicate(path_points, [matrix_world @ point for point in sampled_points])
-
-        return path_points
-
-    if spline.type in {"POLY", "NURBS"}:
-        return [matrix_world @ _point_to_vector(point) for point in spline.points]
-
-    return []
+        return paths[0]
+    finally:
+        if temp_obj is not None:
+            bpy.data.objects.remove(temp_obj, do_unlink=True)
+        bpy.data.curves.remove(temp_curve, do_unlink=True)
 
 
 def _has_valid_segment(points):
@@ -129,7 +244,7 @@ def _resample_path_by_bone_count(path_points, bone_count):
     ]
 
 
-def _collect_valid_chains(curve_obj):
+def _collect_valid_chains(context, curve_obj):
     chains = []
     skipped_splines = 0
 
@@ -139,7 +254,7 @@ def _collect_valid_chains(curve_obj):
             skipped_splines += 1
             continue
 
-        path_points = _spline_path_points(curve_obj, spline)
+        path_points = _evaluated_spline_path_points(context, curve_obj, spline)
         if len(path_points) < 2 or not _has_valid_segment(path_points):
             skipped_splines += 1
             continue
@@ -280,7 +395,7 @@ class BONE_TO_CURVE_OT_generate_from_active_curve(bpy.types.Operator):
 
         try:
             _mode_set_object(context)
-            chains, skipped_splines = _collect_valid_chains(curve_obj)
+            chains, skipped_splines = _collect_valid_chains(context, curve_obj)
             if not chains:
                 self.report({"ERROR"}, "Active curve has no spline with at least 2 usable points.")
                 return {"CANCELLED"}

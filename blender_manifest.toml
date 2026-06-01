@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "bone_to_curve"
-version = "1.0.2"
+version = "1.0.3"
 name = "Bone to Curve"
 tagline = "Generate bone chains along the active curve path"
 maintainer = "madan6557"

@@ -22,7 +22,7 @@ Blender addon for generating connected bone chains from the active curve path.
 
 The addon creates a new armature in the same collection as the curve. Each spline with at least two usable control points becomes one connected bone chain.
 
-The number of bones follows the number of control points. Bone positions are resampled along the curve path, so the chain follows the curve shape instead of drawing straight lines between control points.
+The number of bones follows the number of control points. Bone positions are resampled along Blender's evaluated curve path, so Bezier and NURBS path curves follow their visible shape instead of drawing straight lines between control points.
 
 ## Naming
 
@@ -34,5 +34,6 @@ For multiple splines, each chain gets a stable spline suffix before the bone num
 
 - The addon uses control point count for bone count.
 - Bone positions follow the sampled curve path.
+- Supported curve primitives: Bezier, Circle, NURBS Curve, NURBS Circle, and Path.
 - Bone direction follows the curve point order.
 - The curve is not converted, deleted, parented, or constrained.
