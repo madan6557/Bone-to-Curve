@@ -7,12 +7,18 @@ Blender addon for generating connected bone chains from the active curve object'
 - Blender 4.2 or newer
 - A curve object selected as the active object
 
+## Install
+
+1. Zip the repository files so `blender_manifest.toml` is at the zip root.
+2. In Blender, open `Edit > Preferences > Get Extensions`.
+3. Use `Install from Disk` and select the zip.
+4. Enable `Bone to Curve`.
+
 ## Usage
 
-1. Install this repository as a Blender extension or zip it and install from Blender Preferences.
-2. Select one curve object.
-3. Open `View3D > Sidebar > Bone to Curve`.
-4. Click `Generate Bones From Active Curve`.
+1. Select one curve object.
+2. Open `View3D > Sidebar > Bone to Curve`.
+3. Click `Generate Bones From Active Curve`.
 
 The addon creates a new armature in the same collection as the curve. Each spline with at least two usable control points becomes one connected bone chain.
 
