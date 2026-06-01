@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Hair Modeling Toolkit",
     "author": "madan6557",
-    "version": (1, 1, 0),
+    "version": (1, 1, 1),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Hair Toolkit",
     "description": "Curve hair modeling tools and bone chain generation.",
@@ -397,17 +397,16 @@ def _set_spline_positions(spline, positions):
         _reset_bezier_handles_to_path(spline)
 
 
-def _reset_spline_path(context, curve_obj, spline):
+def _reset_spline_path_to_direction(context, curve_obj, spline, direction):
     endpoint_data = _path_endpoint_data(context, curve_obj, spline)
     if endpoint_data is None:
         return False
 
-    root_world, tip_world, total_length, _path_points = endpoint_data
-    direction = tip_world - root_world
+    root_world, _tip_world, total_length, _path_points = endpoint_data
     if direction.length <= MIN_BONE_LENGTH:
         return False
 
-    direction.normalize()
+    direction = direction.normalized()
     point_count = _control_point_count(spline)
     matrix_inverted = curve_obj.matrix_world.inverted()
     positions = [
@@ -420,6 +419,28 @@ def _reset_spline_path(context, curve_obj, spline):
         _set_point_tilt(point, 0.0)
 
     return True
+
+
+def _reset_spline_path(context, curve_obj, spline):
+    endpoint_data = _path_endpoint_data(context, curve_obj, spline)
+    if endpoint_data is None:
+        return False
+
+    root_world, tip_world, _total_length, _path_points = endpoint_data
+    return _reset_spline_path_to_direction(context, curve_obj, spline, tip_world - root_world)
+
+
+def _reset_spline_path_x_axis(context, curve_obj, spline):
+    endpoint_data = _path_endpoint_data(context, curve_obj, spline)
+    if endpoint_data is None:
+        return False
+
+    root_world, tip_world, _total_length, _path_points = endpoint_data
+    direction = Vector((1.0, 0.0, 0.0))
+    if (tip_world - root_world).dot(direction) < 0.0:
+        direction.negate()
+
+    return _reset_spline_path_to_direction(context, curve_obj, spline, direction)
 
 
 def _reverse_spline_direction(spline):
@@ -743,6 +764,35 @@ class HMT_OT_reset_path(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class HMT_OT_reset_path_x_axis(bpy.types.Operator):
+    bl_idname = "hair_modeling_toolkit.reset_path_x_axis"
+    bl_label = "X Axis"
+    bl_description = "Straighten the active open curve along the global X axis"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_curve(context) is not None
+
+    def execute(self, context):
+        curve_obj, splines = _require_editable_open_curve(self, context)
+        if curve_obj is None:
+            return {"CANCELLED"}
+
+        changed_count = 0
+        for spline in splines:
+            if _reset_spline_path_x_axis(context, curve_obj, spline):
+                changed_count += 1
+
+        if changed_count == 0:
+            self.report({"ERROR"}, "No valid open spline path could be straightened on X axis.")
+            return {"CANCELLED"}
+
+        context.view_layer.update()
+        self.report({"INFO"}, f"Straightened {changed_count} curve splines on X axis.")
+        return {"FINISHED"}
+
+
 class HMT_OT_switch_direction(bpy.types.Operator):
     bl_idname = "hair_modeling_toolkit.switch_direction"
     bl_label = "Switch Direction"
@@ -799,6 +849,41 @@ class HMT_OT_set_origin(bpy.types.Operator):
         _move_curve_origin_preserve_shape(curve_obj, target_world)
         context.view_layer.update()
         self.report({"INFO"}, f"Set origin to {self.mode.lower()}.")
+        return {"FINISHED"}
+
+
+class HMT_OT_snap_cursor(bpy.types.Operator):
+    bl_idname = "hair_modeling_toolkit.snap_cursor"
+    bl_label = "Snap 3D Cursor"
+    bl_description = "Snap the 3D cursor to the active curve root, tip, or center"
+    bl_options = {"REGISTER", "UNDO"}
+
+    mode: bpy.props.EnumProperty(
+        name="Target",
+        items=(
+            ("ROOT", "Root", "Snap cursor to curve root"),
+            ("TIP", "Tip", "Snap cursor to curve tip"),
+            ("CENTER", "Center", "Snap cursor to midpoint by path length"),
+        ),
+        default="ROOT",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return _active_curve(context) is not None
+
+    def execute(self, context):
+        curve_obj, _splines = _require_editable_open_curve(self, context)
+        if curve_obj is None:
+            return {"CANCELLED"}
+
+        target_world = _origin_target_world(context, curve_obj, self.mode)
+        if target_world is None:
+            self.report({"ERROR"}, "Could not find a valid cursor target on the active curve.")
+            return {"CANCELLED"}
+
+        context.scene.cursor.location = target_world
+        self.report({"INFO"}, f"Snapped 3D cursor to {self.mode.lower()}.")
         return {"FINISHED"}
 
 
@@ -935,14 +1020,25 @@ class HMT_PT_tools(bpy.types.Panel):
         curve_box.label(text="Curve Controls", icon="CURVE_DATA")
         row = curve_box.row(align=True)
         row.operator(HMT_OT_reset_path.bl_idname)
+        row.operator(HMT_OT_reset_path_x_axis.bl_idname)
         row.operator(HMT_OT_switch_direction.bl_idname)
 
+        curve_box.label(text="Origin To")
         row = curve_box.row(align=True)
         op = row.operator(HMT_OT_set_origin.bl_idname, text="Root")
         op.mode = "ROOT"
         op = row.operator(HMT_OT_set_origin.bl_idname, text="Tip")
         op.mode = "TIP"
         op = row.operator(HMT_OT_set_origin.bl_idname, text="Center")
+        op.mode = "CENTER"
+
+        curve_box.label(text="3D Cursor To")
+        row = curve_box.row(align=True)
+        op = row.operator(HMT_OT_snap_cursor.bl_idname, text="Root")
+        op.mode = "ROOT"
+        op = row.operator(HMT_OT_snap_cursor.bl_idname, text="Tip")
+        op.mode = "TIP"
+        op = row.operator(HMT_OT_snap_cursor.bl_idname, text="Center")
         op.mode = "CENTER"
 
         smooth_box = layout.box()
@@ -969,8 +1065,10 @@ classes = (
     HMT_PG_settings,
     HMT_OT_generate_bones_from_active_curve,
     HMT_OT_reset_path,
+    HMT_OT_reset_path_x_axis,
     HMT_OT_switch_direction,
     HMT_OT_set_origin,
+    HMT_OT_snap_cursor,
     HMT_OT_smooth_scale,
     HMT_OT_smooth_curve,
     HMT_OT_smooth_twist,
