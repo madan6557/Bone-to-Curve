@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Curve Toolkit",
     "author": "madan6557",
-    "version": (1, 6, 1),
+    "version": (1, 6, 2),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Curve Toolkit",
     "description": "Curve modeling tools and bone chain generation.",
@@ -12,6 +12,7 @@ bl_info = {
 }
 
 import json
+from math import pi
 
 import bpy
 from bpy.app.handlers import persistent
@@ -743,7 +744,7 @@ def _signed_angle_around_axis(source, target, axis):
     return angle
 
 
-def _bake_current_twist_to_z_up(context, curve_obj):
+def _bake_current_twist_to_mode(context, curve_obj, target_mode):
     current_mode = getattr(curve_obj.data, "twist_mode", "MINIMUM")
     changed = False
 
@@ -758,16 +759,25 @@ def _bake_current_twist_to_z_up(context, curve_obj):
         z_up_normals = [_project_normal(Vector((0.0, 0.0, 1.0)), tangent) for tangent in tangents]
         minimum_normals = _minimum_twist_normals(tangents)
         current_normals = z_up_normals if current_mode == "Z_UP" else minimum_normals
+        target_normals = z_up_normals if target_mode == "Z_UP" else minimum_normals
 
-        for point, tangent, z_up_normal, current_normal in zip(_spline_points(spline), tangents, z_up_normals, current_normals):
-            delta = _signed_angle_around_axis(z_up_normal, current_normal, tangent)
+        for point, tangent, target_normal, current_normal in zip(_spline_points(spline), tangents, target_normals, current_normals):
+            delta = _signed_angle_around_axis(target_normal, current_normal, tangent)
             _set_point_tilt(point, _point_tilt(point) + delta)
         changed = True
 
     if changed:
-        _set_curve_twist_mode(curve_obj, "Z_UP")
+        _set_curve_twist_mode(curve_obj, target_mode)
 
     return changed
+
+
+def _bake_current_twist_to_z_up(context, curve_obj):
+    return _bake_current_twist_to_mode(context, curve_obj, "Z_UP")
+
+
+def _bake_current_twist_to_minimum(context, curve_obj):
+    return _bake_current_twist_to_mode(context, curve_obj, "MINIMUM")
 
 
 def _set_curve_twist_mode(curve_obj, twist_mode):
@@ -1921,6 +1931,30 @@ class CTK_OT_reset_twist(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CTK_OT_flip_twist(bpy.types.Operator):
+    bl_idname = "curve_toolkit.flip_twist"
+    bl_label = "Flip Twist"
+    bl_description = "Add 180 degrees to curve point twist values"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_curve(context) is not None
+
+    def execute(self, context):
+        curve_obj, splines = _require_editable_open_curve(self, context)
+        if curve_obj is None:
+            return {"CANCELLED"}
+
+        for spline in splines:
+            for point in _spline_points(spline):
+                _set_point_tilt(point, _point_tilt(point) + pi)
+
+        context.view_layer.update()
+        self.report({"INFO"}, f"Flipped twist for {len(splines)} splines.")
+        return {"FINISHED"}
+
+
 class CTK_OT_lock_twist(bpy.types.Operator):
     bl_idname = "curve_toolkit.lock_twist"
     bl_label = "Lock Twist"
@@ -1962,9 +1996,12 @@ class CTK_OT_unlock_twist(bpy.types.Operator):
             self.report({"ERROR"}, "Active object must be a Curve.")
             return {"CANCELLED"}
 
-        _set_curve_twist_mode(curve_obj, "MINIMUM")
+        if not _bake_current_twist_to_minimum(context, curve_obj):
+            self.report({"ERROR"}, "Active curve has no editable spline with at least 2 points.")
+            return {"CANCELLED"}
+
         context.view_layer.update()
-        self.report({"INFO"}, "Unlocked automatic twist with Minimum mode.")
+        self.report({"INFO"}, "Unlocked twist and preserved current state.")
         return {"FINISHED"}
 
 
@@ -1994,8 +2031,13 @@ class CTK_OT_set_endpoint_lock(bpy.types.Operator):
             return {"CANCELLED"}
 
         context.view_layer.update()
+        if not self.enabled:
+            _apply_endpoint_locks_to_curve(curve_obj)
+            context.view_layer.update()
+
         _store_endpoint_lock_positions(curve_obj, self.mode, self.enabled)
-        _apply_endpoint_locks_to_curve(curve_obj)
+        if self.enabled:
+            _apply_endpoint_locks_to_curve(curve_obj)
         context.view_layer.update()
 
         endpoint_name = "root" if self.mode == "ROOT" else "tip"
@@ -2250,6 +2292,7 @@ class CTK_PT_tools(bpy.types.Panel):
         row = lock_box.row(align=True)
         row.operator(CTK_OT_lock_twist.bl_idname, depress=twist_locked)
         row.operator(CTK_OT_unlock_twist.bl_idname, depress=twist_unlocked)
+        row.operator(CTK_OT_flip_twist.bl_idname)
 
         row = lock_box.row(align=True)
         op = row.operator(CTK_OT_set_endpoint_lock.bl_idname, text="Lock Root", depress=root_locked)
@@ -2317,6 +2360,7 @@ classes = (
     CTK_OT_smooth_twist,
     CTK_OT_reset_scale,
     CTK_OT_reset_twist,
+    CTK_OT_flip_twist,
     CTK_OT_lock_twist,
     CTK_OT_unlock_twist,
     CTK_OT_set_endpoint_lock,
