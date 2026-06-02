@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Curve Toolkit",
     "author": "madan6557",
-    "version": (1, 6, 0),
+    "version": (1, 6, 1),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Curve Toolkit",
     "description": "Curve modeling tools and bone chain generation.",
@@ -1149,7 +1149,7 @@ def _clamp_node_index(value, control_count):
 
 
 def _custom_node_range(control_count, bone_count, fill_mode, start_node, end_node):
-    if control_count < 2 or bone_count < 1:
+    if control_count < 2:
         return None
 
     if fill_mode == "END_TO_END":
@@ -1164,12 +1164,20 @@ def _custom_node_range(control_count, bone_count, fill_mode, start_node, end_nod
         return None
 
     interval_count = range_end - range_start
+    if bone_count <= 0:
+        return range_start, range_end
     if fill_mode == "FROM_ROOT" and bone_count <= interval_count:
         return range_start, range_start + bone_count
     if fill_mode == "FROM_TIP" and bone_count <= interval_count:
         return range_end - bone_count, range_end
 
     return range_start, range_end
+
+
+def _custom_bone_count(requested_bone_count, range_start, range_end):
+    if requested_bone_count > 0:
+        return requested_bone_count
+    return max(1, range_end - range_start)
 
 
 def _node_distance(total_length, control_count, node_index):
@@ -1198,9 +1206,10 @@ def _collect_custom_chains(context, curve_obj, bone_count, fill_mode, start_node
             continue
 
         range_start, range_end = node_range
+        resolved_bone_count = _custom_bone_count(bone_count, range_start, range_end)
         start_distance = _node_distance(total_length, control_count, range_start)
         end_distance = _node_distance(total_length, control_count, range_end)
-        joints = _resample_path_segment_by_bone_count(path_points, start_distance, end_distance, bone_count)
+        joints = _resample_path_segment_by_bone_count(path_points, start_distance, end_distance, resolved_bone_count)
         if len(joints) < 2:
             skipped_splines += 1
             continue
@@ -1449,9 +1458,9 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
 
     rig_bone_count: IntProperty(
         name="Bone Count",
-        description="Number of bones to generate with the custom rigging tool",
-        default=3,
-        min=1,
+        description="Number of bones to generate. 0 follows the target node count",
+        default=0,
+        min=0,
         max=256,
     )
 

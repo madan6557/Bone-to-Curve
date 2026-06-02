@@ -70,7 +70,7 @@ Caps buttons show the current cap state in the panel.
 
 The number of bones follows the number of control points. Bone positions are resampled along Blender's evaluated curve path, so Bezier and NURBS path curves follow their visible shape instead of drawing straight lines between control points.
 
-`Generate Custom Bones` creates a new armature with the chosen `Bone Count`.
+`Generate Custom Bones` creates a new armature with the chosen `Bone Count`. `0` follows the target node interval count.
 
 - `End To End`: ignores target nodes and fills from curve root to tip.
 - `From Root`: starts from the root side of the target node range.
