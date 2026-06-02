@@ -2,7 +2,7 @@
 
 Blender addon for curve modeling helpers and bone chain generation.
 
-Each major panel section is collapsible. The `Rigging` section also has collapsible subsections for point-based generation, custom-count generation, and armature tools.
+Each major panel section is collapsible.
 
 ## Requirements
 
@@ -25,6 +25,7 @@ The panel is available at `View3D > Sidebar > Curve Toolkit`.
 - `Reset Path`: straightens open curve splines from root toward tip, preserves current evaluated path length, and resets twist.
 - `X Axis`: moves all open curve points to the curve X center while preserving each point's Y and Z position, then resets twist.
 - `Switch Direction`: reverses open curve spline direction.
+- `Flip Twist`: adds 180 degrees to the current curve point twist values.
 - `Origin To` Root, Tip, Center: moves the curve origin without moving the visible curve. Center uses the midpoint by evaluated path length.
 - `3D Cursor To` Root, Tip, Center: snaps the 3D cursor to the same curve positions.
 
@@ -53,7 +54,6 @@ Closed curve splines are protected from destructive edit operations.
 
 - `Lock Twist`: stores the current twist state and preserves it when curve points move without changing Blender's twist method.
 - `Unlock Twist`: releases the toolkit twist lock without changing the current curve shape.
-- `Flip Twist`: adds 180 degrees to the current curve point twist values.
 - `Lock Root` and `Lock Tip`: store the current endpoint world position for each open spline and keep it fixed while the lock is active.
 - `Unlock Root` and `Unlock Tip`: bake the locked endpoint position into the curve before releasing the stored endpoint lock.
 - Lock buttons show their active state in the panel.

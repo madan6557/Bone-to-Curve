@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Curve Toolkit",
     "author": "madan6557",
-    "version": (1, 6, 5),
+    "version": (1, 6, 7),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Curve Toolkit",
     "description": "Curve modeling tools and bone chain generation.",
@@ -1515,9 +1515,6 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
     show_mirror: BoolProperty(name="Mirror", default=True)
     show_caps: BoolProperty(name="Caps", default=True)
     show_rigging: BoolProperty(name="Rigging", default=True)
-    show_rig_from_points: BoolProperty(name="From Control Points", default=True)
-    show_rig_custom_count: BoolProperty(name="Custom Count", default=True)
-    show_rig_armature_tools: BoolProperty(name="Armature Tools", default=True)
 
     smooth_factor: FloatProperty(
         name="Factor",
@@ -2333,6 +2330,7 @@ class CTK_PT_tools(bpy.types.Panel):
             row.operator(CTK_OT_reset_path.bl_idname)
             row.operator(CTK_OT_reset_path_x_axis.bl_idname)
             row.operator(CTK_OT_switch_direction.bl_idname)
+            curve_box.operator(CTK_OT_flip_twist.bl_idname)
 
             curve_box.label(text="Origin To")
             row = curve_box.row(align=True)
@@ -2395,7 +2393,6 @@ class CTK_PT_tools(bpy.types.Panel):
             row = lock_box.row(align=True)
             row.operator(CTK_OT_lock_twist.bl_idname, depress=twist_locked)
             row.operator(CTK_OT_unlock_twist.bl_idname, depress=twist_unlocked)
-            row.operator(CTK_OT_flip_twist.bl_idname)
 
             row = lock_box.row(align=True)
             op = row.operator(CTK_OT_set_endpoint_lock.bl_idname, text="Lock Root", depress=root_locked)
@@ -2430,37 +2427,37 @@ class CTK_PT_tools(bpy.types.Panel):
 
         rigging_box = layout.box()
         if self._draw_foldout(rigging_box, settings, "show_rigging", "Rigging", "ARMATURE_DATA"):
-            if self._draw_foldout(rigging_box, settings, "show_rig_from_points", "From Control Points"):
-                control_point_column = rigging_box.column(align=True)
-                control_point_column.enabled = curve_obj is not None
-                control_point_column.operator(
-                    CTK_OT_generate_bones_from_active_curve.bl_idname,
-                    text="Generate From Points",
-                    icon="ARMATURE_DATA",
-                )
+            rigging_box.label(text="From Control Points")
+            control_point_column = rigging_box.column(align=True)
+            control_point_column.enabled = curve_obj is not None
+            control_point_column.operator(
+                CTK_OT_generate_bones_from_active_curve.bl_idname,
+                text="Generate From Points",
+                icon="ARMATURE_DATA",
+            )
 
             rigging_box.separator()
-            if self._draw_foldout(rigging_box, settings, "show_rig_custom_count", "Custom Count"):
-                rigging_box.prop(settings, "rig_bone_count")
-                rigging_box.prop(settings, "rig_fill_mode")
-                node_row = rigging_box.row(align=True)
-                node_row.enabled = settings.rig_fill_mode != "END_TO_END"
-                node_row.prop(settings, "rig_start_node")
-                node_row.prop(settings, "rig_end_node")
+            rigging_box.label(text="Custom Count")
+            rigging_box.prop(settings, "rig_bone_count")
+            rigging_box.prop(settings, "rig_fill_mode")
+            node_row = rigging_box.row(align=True)
+            node_row.enabled = settings.rig_fill_mode != "END_TO_END"
+            node_row.prop(settings, "rig_start_node")
+            node_row.prop(settings, "rig_end_node")
 
-                custom_column = rigging_box.column(align=True)
-                custom_column.enabled = curve_obj is not None
-                custom_column.operator(
-                    CTK_OT_generate_custom_bones_from_active_curve.bl_idname,
-                    text="Generate Custom Count",
-                    icon="ARMATURE_DATA",
-                )
+            custom_column = rigging_box.column(align=True)
+            custom_column.enabled = curve_obj is not None
+            custom_column.operator(
+                CTK_OT_generate_custom_bones_from_active_curve.bl_idname,
+                text="Generate Custom Count",
+                icon="ARMATURE_DATA",
+            )
 
             rigging_box.separator()
-            if self._draw_foldout(rigging_box, settings, "show_rig_armature_tools", "Armature Tools"):
-                invert_row = rigging_box.row(align=True)
-                invert_row.enabled = armature_obj is not None
-                invert_row.operator(CTK_OT_invert_selected_bones.bl_idname)
+            rigging_box.label(text="Armature Tools")
+            invert_row = rigging_box.row(align=True)
+            invert_row.enabled = armature_obj is not None
+            invert_row.operator(CTK_OT_invert_selected_bones.bl_idname)
 
 
 classes = (
