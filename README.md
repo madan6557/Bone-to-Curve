@@ -70,6 +70,15 @@ Caps buttons show the current cap state in the panel.
 
 The number of bones follows the number of control points. Bone positions are resampled along Blender's evaluated curve path, so Bezier and NURBS path curves follow their visible shape instead of drawing straight lines between control points.
 
+`Generate Custom Bones` creates a new armature with the chosen `Bone Count`.
+
+- `End To End`: ignores target nodes and fills from curve root to tip.
+- `From Root`: starts from the root side of the target node range.
+- `From Tip`: starts from the tip side of the target node range while keeping every bone tail pointed toward the tip.
+- `Start Node` and `End Node` use 1-based node numbers. `0` means auto, so `0-0` uses the full spline.
+
+`Invert Selected Bones` reverses selected armature bones and flips connected parent order. It is available when the active object is an armature.
+
 For a single spline, the first bone uses the curve object name. Child bones append a three digit suffix to that full name.
 
 For multiple splines, each chain gets a stable spline suffix before the bone number, for example `Curve_spline.001`.

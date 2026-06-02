@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Curve Toolkit",
     "author": "madan6557",
-    "version": (1, 5, 0),
+    "version": (1, 6, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Curve Toolkit",
     "description": "Curve modeling tools and bone chain generation.",
@@ -72,6 +72,15 @@ def _active_curve(context):
     if obj is None:
         return None
     if obj.type != "CURVE":
+        return None
+    return obj
+
+
+def _active_armature(context):
+    obj = context.view_layer.objects.active
+    if obj is None:
+        return None
+    if obj.type != "ARMATURE":
         return None
     return obj
 
@@ -450,6 +459,22 @@ def _resample_path_by_bone_count(path_points, bone_count):
 
     return [
         _point_at_distance(path_points, total_length * index / bone_count)
+        for index in range(bone_count + 1)
+    ]
+
+
+def _resample_path_segment_by_bone_count(path_points, start_distance, end_distance, bone_count):
+    total_length = _polyline_length(path_points)
+    if total_length <= MIN_BONE_LENGTH or bone_count < 1:
+        return []
+
+    start_distance = max(0.0, min(total_length, start_distance))
+    end_distance = max(0.0, min(total_length, end_distance))
+    if end_distance - start_distance <= MIN_BONE_LENGTH:
+        return []
+
+    return [
+        _point_at_distance(path_points, start_distance + (end_distance - start_distance) * index / bone_count)
         for index in range(bone_count + 1)
     ]
 
@@ -1119,6 +1144,72 @@ def _collect_valid_chains(context, curve_obj):
     return chains, skipped_splines
 
 
+def _clamp_node_index(value, control_count):
+    return max(1, min(control_count, int(value)))
+
+
+def _custom_node_range(control_count, bone_count, fill_mode, start_node, end_node):
+    if control_count < 2 or bone_count < 1:
+        return None
+
+    if fill_mode == "END_TO_END":
+        return 1, control_count
+
+    start_node = 1 if start_node == 0 else _clamp_node_index(start_node, control_count)
+    end_node = control_count if end_node == 0 else _clamp_node_index(end_node, control_count)
+    range_start = min(start_node, end_node)
+    range_end = max(start_node, end_node)
+
+    if range_end - range_start < 1:
+        return None
+
+    interval_count = range_end - range_start
+    if fill_mode == "FROM_ROOT" and bone_count <= interval_count:
+        return range_start, range_start + bone_count
+    if fill_mode == "FROM_TIP" and bone_count <= interval_count:
+        return range_end - bone_count, range_end
+
+    return range_start, range_end
+
+
+def _node_distance(total_length, control_count, node_index):
+    return total_length * (node_index - 1) / (control_count - 1)
+
+
+def _collect_custom_chains(context, curve_obj, bone_count, fill_mode, start_node, end_node):
+    chains = []
+    skipped_splines = 0
+
+    for spline in curve_obj.data.splines:
+        control_count = _control_point_count(spline)
+        node_range = _custom_node_range(control_count, bone_count, fill_mode, start_node, end_node)
+        if node_range is None:
+            skipped_splines += 1
+            continue
+
+        path_points = _evaluated_spline_path_points(context, curve_obj, spline)
+        if len(path_points) < 2 or not _has_valid_segment(path_points):
+            skipped_splines += 1
+            continue
+
+        total_length = _polyline_length(path_points)
+        if total_length <= MIN_BONE_LENGTH:
+            skipped_splines += 1
+            continue
+
+        range_start, range_end = node_range
+        start_distance = _node_distance(total_length, control_count, range_start)
+        end_distance = _node_distance(total_length, control_count, range_end)
+        joints = _resample_path_segment_by_bone_count(path_points, start_distance, end_distance, bone_count)
+        if len(joints) < 2:
+            skipped_splines += 1
+            continue
+
+        chains.append(joints)
+
+    return chains, skipped_splines
+
+
 def _chain_base_name(curve_name, chain_count, chain_index):
     if chain_count == 1:
         return curve_name
@@ -1215,6 +1306,91 @@ def _create_armature_from_chains(context, curve_obj, chains):
     return armature_obj, bone_count, skipped_segments
 
 
+def _selected_bone_names(armature_obj):
+    if armature_obj.mode == "EDIT":
+        return [bone.name for bone in armature_obj.data.edit_bones if bone.select]
+    if armature_obj.mode == "POSE":
+        return [pose_bone.name for pose_bone in armature_obj.pose.bones if pose_bone.bone.select]
+    return [bone.name for bone in armature_obj.data.bones if bone.select]
+
+
+def _selected_edit_bone_chains(edit_bones, selected_names):
+    selected_set = set(selected_names)
+    selected_children = {name: [] for name in selected_set}
+
+    for name in selected_set:
+        bone = edit_bones.get(name)
+        if bone is None:
+            continue
+        if bone.parent is not None and bone.parent.name in selected_set:
+            selected_children[bone.parent.name].append(name)
+
+    roots = [
+        name
+        for name in selected_set
+        if edit_bones[name].parent is None or edit_bones[name].parent.name not in selected_set
+    ]
+    if not roots:
+        return None
+
+    chains = []
+    visited = set()
+    for root in sorted(roots):
+        chain = []
+        current = root
+        while current is not None:
+            if current in visited:
+                return None
+
+            chain.append(current)
+            visited.add(current)
+            children = sorted(selected_children[current])
+            if len(children) > 1:
+                return None
+            current = children[0] if children else None
+
+        chains.append(chain)
+
+    if visited != selected_set:
+        return None
+
+    return chains
+
+
+def _invert_edit_bone_chains(edit_bones, chains):
+    inverted_count = 0
+
+    for chain in chains:
+        for name in chain:
+            edit_bones[name].use_connect = False
+
+        for name in chain:
+            edit_bones[name].parent = None
+
+        for name in chain:
+            bone = edit_bones[name]
+            head = bone.head.copy()
+            tail = bone.tail.copy()
+            bone.head = tail
+            bone.tail = head
+            inverted_count += 1
+
+        for index, name in enumerate(chain):
+            bone = edit_bones[name]
+            if index == len(chain) - 1:
+                bone.parent = None
+                bone.use_connect = False
+                continue
+
+            parent = edit_bones[chain[index + 1]]
+            bone.parent = parent
+            if (bone.head - parent.tail).length <= MIN_BONE_LENGTH:
+                bone.head = parent.tail
+                bone.use_connect = True
+
+    return inverted_count
+
+
 class CTK_PG_resolution_collection_item(bpy.types.PropertyGroup):
     collection: PointerProperty(
         name="Collection",
@@ -1271,6 +1447,41 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
         update=_update_bevel_reference_resolution,
     )
 
+    rig_bone_count: IntProperty(
+        name="Bone Count",
+        description="Number of bones to generate with the custom rigging tool",
+        default=3,
+        min=1,
+        max=256,
+    )
+
+    rig_fill_mode: EnumProperty(
+        name="Fill Mode",
+        description="How the custom rigging tool chooses the curve segment",
+        items=(
+            ("END_TO_END", "End To End", "Generate bones from curve root to tip"),
+            ("FROM_ROOT", "From Root", "Generate bones from the root side of the selected node range"),
+            ("FROM_TIP", "From Tip", "Generate bones from the tip side of the selected node range"),
+        ),
+        default="END_TO_END",
+    )
+
+    rig_start_node: IntProperty(
+        name="Start Node",
+        description="1-based start node. 0 uses the first node",
+        default=0,
+        min=0,
+        max=10000,
+    )
+
+    rig_end_node: IntProperty(
+        name="End Node",
+        description="1-based end node. 0 uses the last node",
+        default=0,
+        min=0,
+        max=10000,
+    )
+
 
 class CTK_OT_generate_bones_from_active_curve(bpy.types.Operator):
     bl_idname = "curve_toolkit.generate_bones_from_active_curve"
@@ -1308,6 +1519,108 @@ class CTK_OT_generate_bones_from_active_curve(bpy.types.Operator):
         if skipped_splines or skipped_segments:
             message += f" Skipped {skipped_splines} splines and {skipped_segments} segments."
         self.report({"INFO"}, message)
+        return {"FINISHED"}
+
+
+class CTK_OT_generate_custom_bones_from_active_curve(bpy.types.Operator):
+    bl_idname = "curve_toolkit.generate_custom_bones_from_active_curve"
+    bl_label = "Generate Custom Bones"
+    bl_description = "Generate a new armature from the active curve with a custom bone count"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        curve_obj = _active_curve(context)
+        if curve_obj is None:
+            cls.poll_message_set("Active object must be a Curve.")
+            return False
+        return True
+
+    def execute(self, context):
+        curve_obj = _active_curve(context)
+        if curve_obj is None:
+            self.report({"ERROR"}, "Active object must be a Curve.")
+            return {"CANCELLED"}
+
+        settings = context.scene.curve_toolkit
+        try:
+            _mode_set_object(context)
+            chains, skipped_splines = _collect_custom_chains(
+                context,
+                curve_obj,
+                settings.rig_bone_count,
+                settings.rig_fill_mode,
+                settings.rig_start_node,
+                settings.rig_end_node,
+            )
+            if not chains:
+                self.report({"ERROR"}, "Active curve has no valid spline segment for custom bones.")
+                return {"CANCELLED"}
+
+            armature_obj, bone_count, skipped_segments = _create_armature_from_chains(context, curve_obj, chains)
+        except Exception as exc:
+            self.report({"ERROR"}, f"Failed to create custom bones: {exc}")
+            return {"CANCELLED"}
+
+        message = f"Created {bone_count} custom bones in {armature_obj.name}."
+        if skipped_splines or skipped_segments:
+            message += f" Skipped {skipped_splines} splines and {skipped_segments} segments."
+        self.report({"INFO"}, message)
+        return {"FINISHED"}
+
+
+class CTK_OT_invert_selected_bones(bpy.types.Operator):
+    bl_idname = "curve_toolkit.invert_selected_bones"
+    bl_label = "Invert Selected Bones"
+    bl_description = "Reverse selected armature bone directions and connected parent order"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        armature_obj = _active_armature(context)
+        if armature_obj is None:
+            cls.poll_message_set("Active object must be an Armature.")
+            return False
+        return True
+
+    def execute(self, context):
+        armature_obj = _active_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "Active object must be an Armature.")
+            return {"CANCELLED"}
+
+        previous_mode = armature_obj.mode
+        selected_names = _selected_bone_names(armature_obj)
+        if not selected_names:
+            self.report({"ERROR"}, "Select at least one bone to invert.")
+            return {"CANCELLED"}
+
+        try:
+            context.view_layer.objects.active = armature_obj
+            armature_obj.select_set(True)
+            if armature_obj.mode != "EDIT":
+                bpy.ops.object.mode_set(mode="EDIT")
+
+            edit_bones = armature_obj.data.edit_bones
+            selected_names = [name for name in selected_names if edit_bones.get(name) is not None]
+            if not selected_names:
+                self.report({"ERROR"}, "Selected bones are no longer available in Edit Mode.")
+                return {"CANCELLED"}
+
+            chains = _selected_edit_bone_chains(edit_bones, selected_names)
+            if chains is None:
+                self.report({"ERROR"}, "Selected bones must be linear connected chains.")
+                return {"CANCELLED"}
+
+            inverted_count = _invert_edit_bone_chains(edit_bones, chains)
+        finally:
+            if previous_mode != armature_obj.mode:
+                if previous_mode in {"OBJECT", "EDIT", "POSE"}:
+                    bpy.ops.object.mode_set(mode=previous_mode)
+                else:
+                    bpy.ops.object.mode_set(mode="OBJECT")
+
+        self.report({"INFO"}, f"Inverted {inverted_count} selected bones.")
         return {"FINISHED"}
 
 
@@ -1845,6 +2158,7 @@ class CTK_PT_tools(bpy.types.Panel):
         layout = self.layout
         settings = context.scene.curve_toolkit
         curve_obj = _active_curve(context)
+        armature_obj = _active_armature(context)
         twist_locked = curve_obj is not None and getattr(curve_obj.data, "twist_mode", "") == "Z_UP"
         root_locked = curve_obj is not None and _custom_bool(curve_obj, "ctk_lock_root", "hmt_lock_root")
         tip_locked = curve_obj is not None and _custom_bool(curve_obj, "ctk_lock_tip", "hmt_lock_tip")
@@ -1961,13 +2275,29 @@ class CTK_PT_tools(bpy.types.Panel):
 
         rigging_box = layout.box()
         rigging_box.label(text="Rigging", icon="ARMATURE_DATA")
-        rigging_box.operator(CTK_OT_generate_bones_from_active_curve.bl_idname, icon="ARMATURE_DATA")
+        rigging_box.prop(settings, "rig_bone_count")
+        rigging_box.prop(settings, "rig_fill_mode")
+        node_row = rigging_box.row(align=True)
+        node_row.enabled = settings.rig_fill_mode != "END_TO_END"
+        node_row.prop(settings, "rig_start_node")
+        node_row.prop(settings, "rig_end_node")
+
+        generate_column = rigging_box.column(align=True)
+        generate_column.enabled = curve_obj is not None
+        generate_column.operator(CTK_OT_generate_bones_from_active_curve.bl_idname, icon="ARMATURE_DATA")
+        generate_column.operator(CTK_OT_generate_custom_bones_from_active_curve.bl_idname, icon="ARMATURE_DATA")
+
+        invert_row = rigging_box.row(align=True)
+        invert_row.enabled = armature_obj is not None
+        invert_row.operator(CTK_OT_invert_selected_bones.bl_idname)
 
 
 classes = (
     CTK_PG_resolution_collection_item,
     CTK_PG_settings,
     CTK_OT_generate_bones_from_active_curve,
+    CTK_OT_generate_custom_bones_from_active_curve,
+    CTK_OT_invert_selected_bones,
     CTK_OT_reset_path,
     CTK_OT_reset_path_x_axis,
     CTK_OT_switch_direction,
