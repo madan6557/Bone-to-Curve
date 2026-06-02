@@ -1,6 +1,6 @@
-# Hair Modeling Toolkit
+# Curve Toolkit
 
-Blender addon for curve-based hair modeling helpers and bone chain generation.
+Blender addon for curve modeling helpers and bone chain generation.
 
 ## Requirements
 
@@ -12,13 +12,13 @@ Blender addon for curve-based hair modeling helpers and bone chain generation.
 1. Zip the repository files so `blender_manifest.toml` is at the zip root.
 2. In Blender, open `Edit > Preferences > Get Extensions`.
 3. Use `Install from Disk` and select the zip.
-4. Enable `Hair Modeling Toolkit`.
+4. Enable `Curve Toolkit`.
 
-Uninstall the old `Bone to Curve` extension before installing this version because the extension id changed.
+Uninstall the old `Bone to Curve` or `Hair Modeling Toolkit` extension before installing this version because the extension id changed.
 
 ## Curve Controls
 
-The panel is available at `View3D > Sidebar > Hair Toolkit`.
+The panel is available at `View3D > Sidebar > Curve Toolkit`.
 
 - `Reset Path`: straightens open curve splines from root toward tip, preserves current evaluated path length, and resets twist.
 - `X Axis`: moves all open curve points to the curve X center while preserving each point's Y and Z position, then resets twist.
@@ -72,6 +72,6 @@ The number of bones follows the number of control points. Bone positions are res
 
 For a single spline, the first bone uses the curve object name. Child bones append a three digit suffix to that full name.
 
-For multiple splines, each chain gets a stable spline suffix before the bone number, for example `Hair_spline.001`.
+For multiple splines, each chain gets a stable spline suffix before the bone number, for example `Curve_spline.001`.
 
 Supported curve primitives: Bezier, Circle, NURBS Curve, NURBS Circle, and Path.

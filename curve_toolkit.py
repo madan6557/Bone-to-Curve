@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 bl_info = {
-    "name": "Hair Modeling Toolkit",
+    "name": "Curve Toolkit",
     "author": "madan6557",
-    "version": (1, 4, 2),
+    "version": (1, 5, 0),
     "blender": (4, 2, 0),
-    "location": "View3D > Sidebar > Hair Toolkit",
-    "description": "Curve hair modeling tools and bone chain generation.",
+    "location": "View3D > Sidebar > Curve Toolkit",
+    "description": "Curve modeling tools and bone chain generation.",
     "category": "Curve",
 }
 
@@ -20,7 +20,8 @@ from mathutils import Quaternion, Vector
 
 
 MIN_BONE_LENGTH = 1.0e-6
-HMT_ENDPOINT_LOCKS_KEY = "hmt_endpoint_locks"
+CTK_ENDPOINT_LOCKS_KEY = "ctk_endpoint_locks"
+LEGACY_ENDPOINT_LOCKS_KEY = "hmt_endpoint_locks"
 _ENDPOINT_LOCK_HANDLER_RUNNING = False
 _RESOLUTION_BATCH_UPDATE_RUNNING = False
 
@@ -931,7 +932,7 @@ def _move_point_to_world(curve_obj, spline, point, world_position):
 
 
 def _endpoint_lock_data(curve_obj):
-    raw_data = curve_obj.get(HMT_ENDPOINT_LOCKS_KEY, "{}")
+    raw_data = curve_obj.get(CTK_ENDPOINT_LOCKS_KEY, curve_obj.get(LEGACY_ENDPOINT_LOCKS_KEY, "{}"))
     try:
         data = json.loads(raw_data)
     except (TypeError, ValueError):
@@ -945,8 +946,12 @@ def _endpoint_lock_data(curve_obj):
     return data
 
 
+def _custom_bool(curve_obj, key, legacy_key):
+    return bool(curve_obj.get(key, curve_obj.get(legacy_key, False)))
+
+
 def _store_endpoint_lock_positions(curve_obj, mode, enabled):
-    curve_obj[f"hmt_lock_{mode.lower()}"] = enabled
+    curve_obj[f"ctk_lock_{mode.lower()}"] = enabled
     data = _endpoint_lock_data(curve_obj)
     splines = _editable_splines(curve_obj)
 
@@ -958,7 +963,7 @@ def _store_endpoint_lock_positions(curve_obj, mode, enabled):
             endpoint_positions.append(list(_point_world_co(curve_obj, spline, point)))
         data[mode.lower()] = endpoint_positions
 
-    curve_obj[HMT_ENDPOINT_LOCKS_KEY] = json.dumps(data)
+    curve_obj[CTK_ENDPOINT_LOCKS_KEY] = json.dumps(data)
 
 
 def _apply_endpoint_locks_to_curve(curve_obj):
@@ -967,8 +972,8 @@ def _apply_endpoint_locks_to_curve(curve_obj):
     if _has_closed_spline(curve_obj):
         return False
 
-    lock_root = bool(curve_obj.get("hmt_lock_root", False))
-    lock_tip = bool(curve_obj.get("hmt_lock_tip", False))
+    lock_root = _custom_bool(curve_obj, "ctk_lock_root", "hmt_lock_root")
+    lock_tip = _custom_bool(curve_obj, "ctk_lock_tip", "hmt_lock_tip")
     if not lock_root and not lock_tip:
         return False
 
@@ -986,7 +991,7 @@ def _apply_endpoint_locks_to_curve(curve_obj):
 
 
 @persistent
-def _hmt_endpoint_lock_handler(_scene, _depsgraph):
+def _ctk_endpoint_lock_handler(_scene, _depsgraph):
     global _ENDPOINT_LOCK_HANDLER_RUNNING
 
     if _ENDPOINT_LOCK_HANDLER_RUNNING:
@@ -1210,7 +1215,7 @@ def _create_armature_from_chains(context, curve_obj, chains):
     return armature_obj, bone_count, skipped_segments
 
 
-class HMT_PG_resolution_collection_item(bpy.types.PropertyGroup):
+class CTK_PG_resolution_collection_item(bpy.types.PropertyGroup):
     collection: PointerProperty(
         name="Collection",
         description="Collection included in Resolution Batch",
@@ -1218,7 +1223,7 @@ class HMT_PG_resolution_collection_item(bpy.types.PropertyGroup):
     )
 
 
-class HMT_PG_settings(bpy.types.PropertyGroup):
+class CTK_PG_settings(bpy.types.PropertyGroup):
     smooth_factor: FloatProperty(
         name="Factor",
         description="Strength for smoothing operations",
@@ -1245,7 +1250,7 @@ class HMT_PG_settings(bpy.types.PropertyGroup):
     resolution_collections: CollectionProperty(
         name="Collections",
         description="Collections included in Resolution Batch",
-        type=HMT_PG_resolution_collection_item,
+        type=CTK_PG_resolution_collection_item,
     )
 
     path_resolution: IntProperty(
@@ -1267,8 +1272,8 @@ class HMT_PG_settings(bpy.types.PropertyGroup):
     )
 
 
-class HMT_OT_generate_bones_from_active_curve(bpy.types.Operator):
-    bl_idname = "hair_modeling_toolkit.generate_bones_from_active_curve"
+class CTK_OT_generate_bones_from_active_curve(bpy.types.Operator):
+    bl_idname = "curve_toolkit.generate_bones_from_active_curve"
     bl_label = "Generate Bones From Active Curve"
     bl_description = "Generate a new armature from the active curve path"
     bl_options = {"REGISTER", "UNDO"}
@@ -1306,8 +1311,8 @@ class HMT_OT_generate_bones_from_active_curve(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class HMT_OT_reset_path(bpy.types.Operator):
-    bl_idname = "hair_modeling_toolkit.reset_path"
+class CTK_OT_reset_path(bpy.types.Operator):
+    bl_idname = "curve_toolkit.reset_path"
     bl_label = "Reset Path"
     bl_description = "Straighten the active open curve while preserving root and current path length"
     bl_options = {"REGISTER", "UNDO"}
@@ -1335,8 +1340,8 @@ class HMT_OT_reset_path(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class HMT_OT_reset_path_x_axis(bpy.types.Operator):
-    bl_idname = "hair_modeling_toolkit.reset_path_x_axis"
+class CTK_OT_reset_path_x_axis(bpy.types.Operator):
+    bl_idname = "curve_toolkit.reset_path_x_axis"
     bl_label = "X Axis"
     bl_description = "Move all points to the curve X center while preserving Y and Z"
     bl_options = {"REGISTER", "UNDO"}
@@ -1364,8 +1369,8 @@ class HMT_OT_reset_path_x_axis(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class HMT_OT_switch_direction(bpy.types.Operator):
-    bl_idname = "hair_modeling_toolkit.switch_direction"
+class CTK_OT_switch_direction(bpy.types.Operator):
+    bl_idname = "curve_toolkit.switch_direction"
     bl_label = "Switch Direction"
     bl_description = "Reverse active open curve spline direction"
     bl_options = {"REGISTER", "UNDO"}
@@ -1387,8 +1392,8 @@ class HMT_OT_switch_direction(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class HMT_OT_set_origin(bpy.types.Operator):
-    bl_idname = "hair_modeling_toolkit.set_origin"
+class CTK_OT_set_origin(bpy.types.Operator):
+    bl_idname = "curve_toolkit.set_origin"
     bl_label = "Set Origin"
     bl_description = "Move curve origin without moving the visible curve"
     bl_options = {"REGISTER", "UNDO"}
@@ -1423,8 +1428,8 @@ class HMT_OT_set_origin(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class HMT_OT_snap_cursor(bpy.types.Operator):
-    bl_idname = "hair_modeling_toolkit.snap_cursor"
+class CTK_OT_snap_cursor(bpy.types.Operator):
+    bl_idname = "curve_toolkit.snap_cursor"
     bl_label = "Snap 3D Cursor"
     bl_description = "Snap the 3D cursor to the active curve root, tip, or center"
     bl_options = {"REGISTER", "UNDO"}
@@ -1458,8 +1463,8 @@ class HMT_OT_snap_cursor(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class HMT_OT_smooth_scale(bpy.types.Operator):
-    bl_idname = "hair_modeling_toolkit.smooth_scale"
+class CTK_OT_smooth_scale(bpy.types.Operator):
+    bl_idname = "curve_toolkit.smooth_scale"
     bl_label = "Smooth Scale"
     bl_description = "Smooth curve point radius values"
     bl_options = {"REGISTER", "UNDO"}
@@ -1473,7 +1478,7 @@ class HMT_OT_smooth_scale(bpy.types.Operator):
         if curve_obj is None:
             return {"CANCELLED"}
 
-        settings = context.scene.hair_modeling_toolkit
+        settings = context.scene.curve_toolkit
         for spline in splines:
             _smooth_spline_radius(spline, settings.smooth_factor, settings.smooth_steps)
 
@@ -1482,8 +1487,8 @@ class HMT_OT_smooth_scale(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class HMT_OT_smooth_curve(bpy.types.Operator):
-    bl_idname = "hair_modeling_toolkit.smooth_curve"
+class CTK_OT_smooth_curve(bpy.types.Operator):
+    bl_idname = "curve_toolkit.smooth_curve"
     bl_label = "Smooth Curve"
     bl_description = "Smooth curve control point positions"
     bl_options = {"REGISTER", "UNDO"}
@@ -1497,7 +1502,7 @@ class HMT_OT_smooth_curve(bpy.types.Operator):
         if curve_obj is None:
             return {"CANCELLED"}
 
-        settings = context.scene.hair_modeling_toolkit
+        settings = context.scene.curve_toolkit
         selected_mode = _has_selected_points(splines)
         changed_count = 0
 
@@ -1524,8 +1529,8 @@ class HMT_OT_smooth_curve(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class HMT_OT_smooth_twist(bpy.types.Operator):
-    bl_idname = "hair_modeling_toolkit.smooth_twist"
+class CTK_OT_smooth_twist(bpy.types.Operator):
+    bl_idname = "curve_toolkit.smooth_twist"
     bl_label = "Smooth Twist"
     bl_description = "Smooth curve point tilt values"
     bl_options = {"REGISTER", "UNDO"}
@@ -1539,7 +1544,7 @@ class HMT_OT_smooth_twist(bpy.types.Operator):
         if curve_obj is None:
             return {"CANCELLED"}
 
-        settings = context.scene.hair_modeling_toolkit
+        settings = context.scene.curve_toolkit
         for spline in splines:
             _smooth_spline_tilt(spline, settings.smooth_factor, settings.smooth_steps)
 
@@ -1548,8 +1553,8 @@ class HMT_OT_smooth_twist(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class HMT_OT_reset_scale(bpy.types.Operator):
-    bl_idname = "hair_modeling_toolkit.reset_scale"
+class CTK_OT_reset_scale(bpy.types.Operator):
+    bl_idname = "curve_toolkit.reset_scale"
     bl_label = "Reset Scale"
     bl_description = "Reset curve point radius values to 1"
     bl_options = {"REGISTER", "UNDO"}
@@ -1571,8 +1576,8 @@ class HMT_OT_reset_scale(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class HMT_OT_reset_twist(bpy.types.Operator):
-    bl_idname = "hair_modeling_toolkit.reset_twist"
+class CTK_OT_reset_twist(bpy.types.Operator):
+    bl_idname = "curve_toolkit.reset_twist"
     bl_label = "Reset Twist"
     bl_description = "Reset curve point tilt values to 0"
     bl_options = {"REGISTER", "UNDO"}
@@ -1594,8 +1599,8 @@ class HMT_OT_reset_twist(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class HMT_OT_lock_twist(bpy.types.Operator):
-    bl_idname = "hair_modeling_toolkit.lock_twist"
+class CTK_OT_lock_twist(bpy.types.Operator):
+    bl_idname = "curve_toolkit.lock_twist"
     bl_label = "Lock Twist"
     bl_description = "Bake the current twist state into point tilt, then use Z-Up twist mode"
     bl_options = {"REGISTER", "UNDO"}
@@ -1619,8 +1624,8 @@ class HMT_OT_lock_twist(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class HMT_OT_unlock_twist(bpy.types.Operator):
-    bl_idname = "hair_modeling_toolkit.unlock_twist"
+class CTK_OT_unlock_twist(bpy.types.Operator):
+    bl_idname = "curve_toolkit.unlock_twist"
     bl_label = "Unlock Twist"
     bl_description = "Restore Blender's default minimum twist mode while preserving manual tilt"
     bl_options = {"REGISTER", "UNDO"}
@@ -1641,8 +1646,8 @@ class HMT_OT_unlock_twist(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class HMT_OT_set_endpoint_lock(bpy.types.Operator):
-    bl_idname = "hair_modeling_toolkit.set_endpoint_lock"
+class CTK_OT_set_endpoint_lock(bpy.types.Operator):
+    bl_idname = "curve_toolkit.set_endpoint_lock"
     bl_label = "Set Endpoint Lock"
     bl_description = "Lock or unlock a curve endpoint at its current world position"
     bl_options = {"REGISTER", "UNDO"}
@@ -1677,8 +1682,8 @@ class HMT_OT_set_endpoint_lock(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class HMT_OT_duplicate_mirror_selected_curves(bpy.types.Operator):
-    bl_idname = "hair_modeling_toolkit.duplicate_mirror_selected_curves"
+class CTK_OT_duplicate_mirror_selected_curves(bpy.types.Operator):
+    bl_idname = "curve_toolkit.duplicate_mirror_selected_curves"
     bl_label = "Duplicate Mirror"
     bl_description = "Duplicate selected curves and mirror them across global X center"
     bl_options = {"REGISTER", "UNDO"}
@@ -1709,8 +1714,8 @@ class HMT_OT_duplicate_mirror_selected_curves(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class HMT_OT_set_fill_caps(bpy.types.Operator):
-    bl_idname = "hair_modeling_toolkit.set_fill_caps"
+class CTK_OT_set_fill_caps(bpy.types.Operator):
+    bl_idname = "curve_toolkit.set_fill_caps"
     bl_label = "Close Ends"
     bl_description = "Close curve geometry caps without changing point radius scale"
     bl_options = {"REGISTER", "UNDO"}
@@ -1737,17 +1742,17 @@ class HMT_OT_set_fill_caps(bpy.types.Operator):
             return {"CANCELLED"}
 
         if self.mode == "OPEN":
-            curve_obj["hmt_cap_root"] = False
-            curve_obj["hmt_cap_tip"] = False
+            curve_obj["ctk_cap_root"] = False
+            curve_obj["ctk_cap_tip"] = False
         elif self.mode == "ROOT":
-            curve_obj["hmt_cap_root"] = True
+            curve_obj["ctk_cap_root"] = True
         elif self.mode == "TIP":
-            curve_obj["hmt_cap_tip"] = True
+            curve_obj["ctk_cap_tip"] = True
         else:
-            curve_obj["hmt_cap_root"] = True
-            curve_obj["hmt_cap_tip"] = True
+            curve_obj["ctk_cap_root"] = True
+            curve_obj["ctk_cap_tip"] = True
 
-        enabled = bool(curve_obj.get("hmt_cap_root", False) or curve_obj.get("hmt_cap_tip", False))
+        enabled = bool(curve_obj.get("ctk_cap_root", False) or curve_obj.get("ctk_cap_tip", False))
         if not _set_curve_fill_caps(curve_obj, enabled):
             self.report({"ERROR"}, "Active curve does not support fill caps.")
             return {"CANCELLED"}
@@ -1760,14 +1765,14 @@ class HMT_OT_set_fill_caps(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class HMT_OT_add_resolution_collection(bpy.types.Operator):
-    bl_idname = "hair_modeling_toolkit.add_resolution_collection"
+class CTK_OT_add_resolution_collection(bpy.types.Operator):
+    bl_idname = "curve_toolkit.add_resolution_collection"
     bl_label = "Add Collection"
     bl_description = "Add the selected collection to Resolution Batch"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
-        settings = context.scene.hair_modeling_toolkit
+        settings = context.scene.curve_toolkit
         collection = settings.resolution_collection
         if collection is None:
             self.report({"WARNING"}, "Choose a collection to add.")
@@ -1787,8 +1792,8 @@ class HMT_OT_add_resolution_collection(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class HMT_OT_remove_resolution_collection(bpy.types.Operator):
-    bl_idname = "hair_modeling_toolkit.remove_resolution_collection"
+class CTK_OT_remove_resolution_collection(bpy.types.Operator):
+    bl_idname = "curve_toolkit.remove_resolution_collection"
     bl_label = "Remove Collection"
     bl_description = "Remove a collection from Resolution Batch"
     bl_options = {"REGISTER", "UNDO"}
@@ -1796,7 +1801,7 @@ class HMT_OT_remove_resolution_collection(bpy.types.Operator):
     index: IntProperty(name="Index", default=-1)
 
     def execute(self, context):
-        settings = context.scene.hair_modeling_toolkit
+        settings = context.scene.curve_toolkit
         if self.index < 0 or self.index >= len(settings.resolution_collections):
             self.report({"ERROR"}, "Invalid Resolution Batch collection index.")
             return {"CANCELLED"}
@@ -1808,14 +1813,14 @@ class HMT_OT_remove_resolution_collection(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class HMT_OT_refresh_resolution_batch(bpy.types.Operator):
-    bl_idname = "hair_modeling_toolkit.refresh_resolution_batch"
+class CTK_OT_refresh_resolution_batch(bpy.types.Operator):
+    bl_idname = "curve_toolkit.refresh_resolution_batch"
     bl_label = "Refresh"
     bl_description = "Refresh Resolution Batch target counts"
     bl_options = {"REGISTER"}
 
     def execute(self, context):
-        settings = context.scene.hair_modeling_toolkit
+        settings = context.scene.curve_toolkit
         collections = _resolution_batch_collections(settings)
         if not collections:
             self.report({"WARNING"}, "Add at least one collection for Resolution Batch.")
@@ -1829,23 +1834,23 @@ class HMT_OT_refresh_resolution_batch(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class HMT_PT_tools(bpy.types.Panel):
-    bl_label = "Hair Modeling Toolkit"
-    bl_idname = "HMT_PT_tools"
+class CTK_PT_tools(bpy.types.Panel):
+    bl_label = "Curve Toolkit"
+    bl_idname = "CTK_PT_tools"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "Hair Toolkit"
+    bl_category = "Curve Toolkit"
 
     def draw(self, context):
         layout = self.layout
-        settings = context.scene.hair_modeling_toolkit
+        settings = context.scene.curve_toolkit
         curve_obj = _active_curve(context)
         twist_locked = curve_obj is not None and getattr(curve_obj.data, "twist_mode", "") == "Z_UP"
-        root_locked = curve_obj is not None and bool(curve_obj.get("hmt_lock_root", False))
-        tip_locked = curve_obj is not None and bool(curve_obj.get("hmt_lock_tip", False))
+        root_locked = curve_obj is not None and _custom_bool(curve_obj, "ctk_lock_root", "hmt_lock_root")
+        tip_locked = curve_obj is not None and _custom_bool(curve_obj, "ctk_lock_tip", "hmt_lock_tip")
         caps_filled = curve_obj is not None and bool(getattr(curve_obj.data, "use_fill_caps", False))
-        cap_root = curve_obj is not None and bool(curve_obj.get("hmt_cap_root", False))
-        cap_tip = curve_obj is not None and bool(curve_obj.get("hmt_cap_tip", False))
+        cap_root = curve_obj is not None and _custom_bool(curve_obj, "ctk_cap_root", "hmt_cap_root")
+        cap_tip = curve_obj is not None and _custom_bool(curve_obj, "ctk_cap_tip", "hmt_cap_tip")
         if caps_filled and not (cap_root or cap_tip):
             cap_root = True
             cap_tip = True
@@ -1857,33 +1862,33 @@ class HMT_PT_tools(bpy.types.Panel):
         curve_box = layout.box()
         curve_box.label(text="Curve Controls", icon="CURVE_DATA")
         row = curve_box.row(align=True)
-        row.operator(HMT_OT_reset_path.bl_idname)
-        row.operator(HMT_OT_reset_path_x_axis.bl_idname)
-        row.operator(HMT_OT_switch_direction.bl_idname)
+        row.operator(CTK_OT_reset_path.bl_idname)
+        row.operator(CTK_OT_reset_path_x_axis.bl_idname)
+        row.operator(CTK_OT_switch_direction.bl_idname)
 
         curve_box.label(text="Origin To")
         row = curve_box.row(align=True)
-        op = row.operator(HMT_OT_set_origin.bl_idname, text="Root")
+        op = row.operator(CTK_OT_set_origin.bl_idname, text="Root")
         op.mode = "ROOT"
-        op = row.operator(HMT_OT_set_origin.bl_idname, text="Tip")
+        op = row.operator(CTK_OT_set_origin.bl_idname, text="Tip")
         op.mode = "TIP"
-        op = row.operator(HMT_OT_set_origin.bl_idname, text="Center")
+        op = row.operator(CTK_OT_set_origin.bl_idname, text="Center")
         op.mode = "CENTER"
 
         curve_box.label(text="3D Cursor To")
         row = curve_box.row(align=True)
-        op = row.operator(HMT_OT_snap_cursor.bl_idname, text="Root")
+        op = row.operator(CTK_OT_snap_cursor.bl_idname, text="Root")
         op.mode = "ROOT"
-        op = row.operator(HMT_OT_snap_cursor.bl_idname, text="Tip")
+        op = row.operator(CTK_OT_snap_cursor.bl_idname, text="Tip")
         op.mode = "TIP"
-        op = row.operator(HMT_OT_snap_cursor.bl_idname, text="Center")
+        op = row.operator(CTK_OT_snap_cursor.bl_idname, text="Center")
         op.mode = "CENTER"
 
         resolution_box = layout.box()
         resolution_box.label(text="Resolution Batch", icon="OUTLINER_COLLECTION")
         row = resolution_box.row(align=True)
         row.prop(settings, "resolution_collection")
-        row.operator(HMT_OT_add_resolution_collection.bl_idname, text="", icon="ADD")
+        row.operator(CTK_OT_add_resolution_collection.bl_idname, text="", icon="ADD")
 
         collections = _resolution_batch_collections(settings)
         if settings.resolution_collections:
@@ -1891,7 +1896,7 @@ class HMT_PT_tools(bpy.types.Panel):
             for index, item in enumerate(settings.resolution_collections):
                 row = resolution_box.row(align=True)
                 row.label(text=item.collection.name if item.collection is not None else "Missing Collection")
-                op = row.operator(HMT_OT_remove_resolution_collection.bl_idname, text="", icon="X")
+                op = row.operator(CTK_OT_remove_resolution_collection.bl_idname, text="", icon="X")
                 op.index = index
         else:
             resolution_box.label(text=f"Collections: {len(collections)}")
@@ -1900,7 +1905,7 @@ class HMT_PT_tools(bpy.types.Panel):
         resolution_box.label(text=f"Paths: {len(path_curves)}  Bevel Refs: {len(bevel_references)}")
         resolution_box.prop(settings, "path_resolution")
         resolution_box.prop(settings, "bevel_reference_resolution")
-        resolution_box.operator(HMT_OT_refresh_resolution_batch.bl_idname)
+        resolution_box.operator(CTK_OT_refresh_resolution_batch.bl_idname)
 
         smooth_box = layout.box()
         smooth_box.label(text="Smooth / Reset", icon="MOD_SMOOTH")
@@ -1908,95 +1913,95 @@ class HMT_PT_tools(bpy.types.Panel):
         smooth_box.prop(settings, "smooth_steps")
 
         row = smooth_box.row(align=True)
-        row.operator(HMT_OT_smooth_scale.bl_idname)
-        row.operator(HMT_OT_smooth_curve.bl_idname)
-        row.operator(HMT_OT_smooth_twist.bl_idname)
+        row.operator(CTK_OT_smooth_scale.bl_idname)
+        row.operator(CTK_OT_smooth_curve.bl_idname)
+        row.operator(CTK_OT_smooth_twist.bl_idname)
 
         row = smooth_box.row(align=True)
-        row.operator(HMT_OT_reset_scale.bl_idname)
-        row.operator(HMT_OT_reset_path.bl_idname, text="Reset Curve")
-        row.operator(HMT_OT_reset_twist.bl_idname)
+        row.operator(CTK_OT_reset_scale.bl_idname)
+        row.operator(CTK_OT_reset_path.bl_idname, text="Reset Curve")
+        row.operator(CTK_OT_reset_twist.bl_idname)
 
         lock_box = layout.box()
         lock_box.label(text="Locks")
         row = lock_box.row(align=True)
-        row.operator(HMT_OT_lock_twist.bl_idname, depress=twist_locked)
-        row.operator(HMT_OT_unlock_twist.bl_idname, depress=twist_unlocked)
+        row.operator(CTK_OT_lock_twist.bl_idname, depress=twist_locked)
+        row.operator(CTK_OT_unlock_twist.bl_idname, depress=twist_unlocked)
 
         row = lock_box.row(align=True)
-        op = row.operator(HMT_OT_set_endpoint_lock.bl_idname, text="Lock Root", depress=root_locked)
+        op = row.operator(CTK_OT_set_endpoint_lock.bl_idname, text="Lock Root", depress=root_locked)
         op.mode = "ROOT"
         op.enabled = True
-        op = row.operator(HMT_OT_set_endpoint_lock.bl_idname, text="Unlock Root", depress=root_unlocked)
+        op = row.operator(CTK_OT_set_endpoint_lock.bl_idname, text="Unlock Root", depress=root_unlocked)
         op.mode = "ROOT"
         op.enabled = False
 
         row = lock_box.row(align=True)
-        op = row.operator(HMT_OT_set_endpoint_lock.bl_idname, text="Lock Tip", depress=tip_locked)
+        op = row.operator(CTK_OT_set_endpoint_lock.bl_idname, text="Lock Tip", depress=tip_locked)
         op.mode = "TIP"
         op.enabled = True
-        op = row.operator(HMT_OT_set_endpoint_lock.bl_idname, text="Unlock Tip", depress=tip_unlocked)
+        op = row.operator(CTK_OT_set_endpoint_lock.bl_idname, text="Unlock Tip", depress=tip_unlocked)
         op.mode = "TIP"
         op.enabled = False
 
         mirror_box = layout.box()
         mirror_box.label(text="Mirror", icon="MOD_MIRROR")
-        mirror_box.operator(HMT_OT_duplicate_mirror_selected_curves.bl_idname)
+        mirror_box.operator(CTK_OT_duplicate_mirror_selected_curves.bl_idname)
 
         caps_box = layout.box()
         caps_box.label(text="Caps", icon="MESH_DATA")
         row = caps_box.row(align=True)
-        op = row.operator(HMT_OT_set_fill_caps.bl_idname, text="Root", depress=cap_root and not cap_tip)
+        op = row.operator(CTK_OT_set_fill_caps.bl_idname, text="Root", depress=cap_root and not cap_tip)
         op.mode = "ROOT"
-        op = row.operator(HMT_OT_set_fill_caps.bl_idname, text="Tip", depress=cap_tip and not cap_root)
+        op = row.operator(CTK_OT_set_fill_caps.bl_idname, text="Tip", depress=cap_tip and not cap_root)
         op.mode = "TIP"
-        op = row.operator(HMT_OT_set_fill_caps.bl_idname, text="Ends", depress=cap_root and cap_tip)
+        op = row.operator(CTK_OT_set_fill_caps.bl_idname, text="Ends", depress=cap_root and cap_tip)
         op.mode = "BOTH"
-        caps_box.operator(HMT_OT_set_fill_caps.bl_idname, text="Open Caps", depress=caps_open).mode = "OPEN"
+        caps_box.operator(CTK_OT_set_fill_caps.bl_idname, text="Open Caps", depress=caps_open).mode = "OPEN"
 
         rigging_box = layout.box()
         rigging_box.label(text="Rigging", icon="ARMATURE_DATA")
-        rigging_box.operator(HMT_OT_generate_bones_from_active_curve.bl_idname, icon="ARMATURE_DATA")
+        rigging_box.operator(CTK_OT_generate_bones_from_active_curve.bl_idname, icon="ARMATURE_DATA")
 
 
 classes = (
-    HMT_PG_resolution_collection_item,
-    HMT_PG_settings,
-    HMT_OT_generate_bones_from_active_curve,
-    HMT_OT_reset_path,
-    HMT_OT_reset_path_x_axis,
-    HMT_OT_switch_direction,
-    HMT_OT_set_origin,
-    HMT_OT_snap_cursor,
-    HMT_OT_smooth_scale,
-    HMT_OT_smooth_curve,
-    HMT_OT_smooth_twist,
-    HMT_OT_reset_scale,
-    HMT_OT_reset_twist,
-    HMT_OT_lock_twist,
-    HMT_OT_unlock_twist,
-    HMT_OT_set_endpoint_lock,
-    HMT_OT_duplicate_mirror_selected_curves,
-    HMT_OT_set_fill_caps,
-    HMT_OT_add_resolution_collection,
-    HMT_OT_remove_resolution_collection,
-    HMT_OT_refresh_resolution_batch,
-    HMT_PT_tools,
+    CTK_PG_resolution_collection_item,
+    CTK_PG_settings,
+    CTK_OT_generate_bones_from_active_curve,
+    CTK_OT_reset_path,
+    CTK_OT_reset_path_x_axis,
+    CTK_OT_switch_direction,
+    CTK_OT_set_origin,
+    CTK_OT_snap_cursor,
+    CTK_OT_smooth_scale,
+    CTK_OT_smooth_curve,
+    CTK_OT_smooth_twist,
+    CTK_OT_reset_scale,
+    CTK_OT_reset_twist,
+    CTK_OT_lock_twist,
+    CTK_OT_unlock_twist,
+    CTK_OT_set_endpoint_lock,
+    CTK_OT_duplicate_mirror_selected_curves,
+    CTK_OT_set_fill_caps,
+    CTK_OT_add_resolution_collection,
+    CTK_OT_remove_resolution_collection,
+    CTK_OT_refresh_resolution_batch,
+    CTK_PT_tools,
 )
 
 
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
-    bpy.types.Scene.hair_modeling_toolkit = PointerProperty(type=HMT_PG_settings)
-    if _hmt_endpoint_lock_handler not in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.append(_hmt_endpoint_lock_handler)
+    bpy.types.Scene.curve_toolkit = PointerProperty(type=CTK_PG_settings)
+    if _ctk_endpoint_lock_handler not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(_ctk_endpoint_lock_handler)
 
 
 def unregister():
-    if _hmt_endpoint_lock_handler in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.remove(_hmt_endpoint_lock_handler)
-    del bpy.types.Scene.hair_modeling_toolkit
+    if _ctk_endpoint_lock_handler in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(_ctk_endpoint_lock_handler)
+    del bpy.types.Scene.curve_toolkit
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
 
