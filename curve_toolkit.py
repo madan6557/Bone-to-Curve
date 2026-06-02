@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Curve Toolkit",
     "author": "madan6557",
-    "version": (1, 6, 2),
+    "version": (1, 6, 3),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Curve Toolkit",
     "description": "Curve modeling tools and bone chain generation.",
@@ -22,8 +22,9 @@ from mathutils import Quaternion, Vector
 
 MIN_BONE_LENGTH = 1.0e-6
 CTK_ENDPOINT_LOCKS_KEY = "ctk_endpoint_locks"
+CTK_TWIST_LOCKS_KEY = "ctk_twist_locks"
 LEGACY_ENDPOINT_LOCKS_KEY = "hmt_endpoint_locks"
-_ENDPOINT_LOCK_HANDLER_RUNNING = False
+_CURVE_LOCK_HANDLER_RUNNING = False
 _RESOLUTION_BATCH_UPDATE_RUNNING = False
 
 
@@ -744,47 +745,134 @@ def _signed_angle_around_axis(source, target, axis):
     return angle
 
 
-def _bake_current_twist_to_mode(context, curve_obj, target_mode):
-    current_mode = getattr(curve_obj.data, "twist_mode", "MINIMUM")
-    changed = False
+def _base_normals_for_twist_mode(curve_obj, tangents):
+    twist_mode = getattr(curve_obj.data, "twist_mode", "MINIMUM")
+    if twist_mode == "Z_UP":
+        return [_project_normal(Vector((0.0, 0.0, 1.0)), tangent) for tangent in tangents]
+    return _minimum_twist_normals(tangents)
+
+
+def _visual_normal_from_tilt(base_normal, tangent, tilt):
+    axis = tangent.copy()
+    if axis.length <= MIN_BONE_LENGTH:
+        axis = Vector((0.0, 1.0, 0.0))
+    else:
+        axis.normalize()
+
+    normal = Quaternion(axis, tilt) @ base_normal
+    return _project_normal(normal, axis)
+
+
+def _twist_lock_data(curve_obj):
+    raw_data = curve_obj.get(CTK_TWIST_LOCKS_KEY, "[]")
+    try:
+        data = json.loads(raw_data)
+    except (TypeError, ValueError):
+        data = []
+
+    if not isinstance(data, list):
+        return []
+    return data
+
+
+def _twist_lock_state_from_curve(curve_obj):
+    state = []
 
     for spline in _editable_splines(curve_obj):
-        point_count = _control_point_count(spline)
-        path_points = _evaluated_spline_path_points(context, curve_obj, spline)
-        sampled_points = _resample_path_by_point_count(path_points, point_count)
-        if len(sampled_points) != point_count:
+        points = list(_spline_points(spline))
+        positions = [_point_world_co(curve_obj, spline, point) for point in points]
+        if len(positions) < 2 or not _has_valid_segment(positions):
             continue
 
-        tangents = _path_tangents(sampled_points)
-        z_up_normals = [_project_normal(Vector((0.0, 0.0, 1.0)), tangent) for tangent in tangents]
-        minimum_normals = _minimum_twist_normals(tangents)
-        current_normals = z_up_normals if current_mode == "Z_UP" else minimum_normals
-        target_normals = z_up_normals if target_mode == "Z_UP" else minimum_normals
+        tangents = _path_tangents(positions)
+        base_normals = _base_normals_for_twist_mode(curve_obj, tangents)
+        tilts = [_point_tilt(point) for point in points]
+        visual_normals = [
+            _visual_normal_from_tilt(base_normal, tangent, tilt)
+            for base_normal, tangent, tilt in zip(base_normals, tangents, tilts)
+        ]
+        state.append(
+            {
+                "points": [list(position) for position in positions],
+                "tilts": tilts,
+                "normals": [list(normal) for normal in visual_normals],
+            }
+        )
 
-        for point, tangent, target_normal, current_normal in zip(_spline_points(spline), tangents, target_normals, current_normals):
-            delta = _signed_angle_around_axis(target_normal, current_normal, tangent)
-            _set_point_tilt(point, _point_tilt(point) + delta)
-        changed = True
+    return state
 
-    if changed:
-        _set_curve_twist_mode(curve_obj, target_mode)
+
+def _store_twist_lock_state(curve_obj, enabled):
+    curve_obj["ctk_lock_twist"] = enabled
+    if enabled:
+        curve_obj[CTK_TWIST_LOCKS_KEY] = json.dumps(_twist_lock_state_from_curve(curve_obj))
+
+
+def _points_changed(current_positions, stored_positions):
+    return any((current - Vector(stored)).length > 1.0e-5 for current, stored in zip(current_positions, stored_positions))
+
+
+def _tilts_changed(current_tilts, stored_tilts):
+    return any(abs(current - float(stored)) > 1.0e-5 for current, stored in zip(current_tilts, stored_tilts))
+
+
+def _apply_twist_lock_to_curve(curve_obj):
+    if curve_obj.type != "CURVE":
+        return False
+    if not _custom_bool(curve_obj, "ctk_lock_twist", "hmt_lock_twist"):
+        return False
+
+    data = _twist_lock_data(curve_obj)
+    splines = _editable_splines(curve_obj)
+    if not splines:
+        return False
+    if len(data) != len(splines):
+        curve_obj[CTK_TWIST_LOCKS_KEY] = json.dumps(_twist_lock_state_from_curve(curve_obj))
+        return False
+
+    changed = False
+    refresh_state = False
+
+    for spline_index, spline in enumerate(splines):
+        entry = data[spline_index]
+        if not isinstance(entry, dict):
+            refresh_state = True
+            continue
+
+        points = list(_spline_points(spline))
+        current_positions = [_point_world_co(curve_obj, spline, point) for point in points]
+        current_tilts = [_point_tilt(point) for point in points]
+        stored_positions = entry.get("points", [])
+        stored_tilts = entry.get("tilts", [])
+        stored_normals = entry.get("normals", [])
+
+        if not (
+            len(current_positions) == len(stored_positions)
+            and len(current_tilts) == len(stored_tilts)
+            and len(current_positions) == len(stored_normals)
+        ):
+            refresh_state = True
+            continue
+
+        if _points_changed(current_positions, stored_positions):
+            tangents = _path_tangents(current_positions)
+            base_normals = _base_normals_for_twist_mode(curve_obj, tangents)
+
+            for point, tangent, base_normal, stored_normal in zip(points, tangents, base_normals, stored_normals):
+                target_normal = _project_normal(Vector(stored_normal), tangent)
+                target_tilt = _signed_angle_around_axis(base_normal, target_normal, tangent)
+                if abs(_point_tilt(point) - target_tilt) > 1.0e-5:
+                    _set_point_tilt(point, target_tilt)
+                    changed = True
+
+            refresh_state = True
+        elif _tilts_changed(current_tilts, stored_tilts):
+            refresh_state = True
+
+    if refresh_state:
+        curve_obj[CTK_TWIST_LOCKS_KEY] = json.dumps(_twist_lock_state_from_curve(curve_obj))
 
     return changed
-
-
-def _bake_current_twist_to_z_up(context, curve_obj):
-    return _bake_current_twist_to_mode(context, curve_obj, "Z_UP")
-
-
-def _bake_current_twist_to_minimum(context, curve_obj):
-    return _bake_current_twist_to_mode(context, curve_obj, "MINIMUM")
-
-
-def _set_curve_twist_mode(curve_obj, twist_mode):
-    if hasattr(curve_obj.data, "twist_mode"):
-        curve_obj.data.twist_mode = twist_mode
-    if twist_mode == "Z_UP" and hasattr(curve_obj.data, "twist_smooth"):
-        curve_obj.data.twist_smooth = 0.0
 
 
 def _set_curve_fill_caps(curve_obj, enabled):
@@ -1026,19 +1114,20 @@ def _apply_endpoint_locks_to_curve(curve_obj):
 
 
 @persistent
-def _ctk_endpoint_lock_handler(_scene, _depsgraph):
-    global _ENDPOINT_LOCK_HANDLER_RUNNING
+def _ctk_curve_lock_handler(_scene, _depsgraph):
+    global _CURVE_LOCK_HANDLER_RUNNING
 
-    if _ENDPOINT_LOCK_HANDLER_RUNNING:
+    if _CURVE_LOCK_HANDLER_RUNNING:
         return
 
-    _ENDPOINT_LOCK_HANDLER_RUNNING = True
+    _CURVE_LOCK_HANDLER_RUNNING = True
     try:
         for obj in bpy.data.objects:
             if obj.type == "CURVE":
                 _apply_endpoint_locks_to_curve(obj)
+                _apply_twist_lock_to_curve(obj)
     finally:
-        _ENDPOINT_LOCK_HANDLER_RUNNING = False
+        _CURVE_LOCK_HANDLER_RUNNING = False
 
 
 def _mirror_world_point_x(point, center_x=0.0):
@@ -1958,7 +2047,7 @@ class CTK_OT_flip_twist(bpy.types.Operator):
 class CTK_OT_lock_twist(bpy.types.Operator):
     bl_idname = "curve_toolkit.lock_twist"
     bl_label = "Lock Twist"
-    bl_description = "Bake the current twist state into point tilt, then use Z-Up twist mode"
+    bl_description = "Store the current twist state and preserve it when curve points move"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -1966,24 +2055,20 @@ class CTK_OT_lock_twist(bpy.types.Operator):
         return _active_curve(context) is not None
 
     def execute(self, context):
-        curve_obj = _active_curve(context)
+        curve_obj, splines = _require_editable_open_curve(self, context)
         if curve_obj is None:
-            self.report({"ERROR"}, "Active object must be a Curve.")
             return {"CANCELLED"}
 
-        if not _bake_current_twist_to_z_up(context, curve_obj):
-            self.report({"ERROR"}, "Active curve has no editable spline with at least 2 points.")
-            return {"CANCELLED"}
-
+        _store_twist_lock_state(curve_obj, True)
         context.view_layer.update()
-        self.report({"INFO"}, "Locked current twist state.")
+        self.report({"INFO"}, f"Locked twist for {len(splines)} splines.")
         return {"FINISHED"}
 
 
 class CTK_OT_unlock_twist(bpy.types.Operator):
     bl_idname = "curve_toolkit.unlock_twist"
     bl_label = "Unlock Twist"
-    bl_description = "Restore Blender's default minimum twist mode while preserving manual tilt"
+    bl_description = "Release the toolkit twist lock without changing the current curve shape"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -1991,17 +2076,13 @@ class CTK_OT_unlock_twist(bpy.types.Operator):
         return _active_curve(context) is not None
 
     def execute(self, context):
-        curve_obj = _active_curve(context)
+        curve_obj, splines = _require_editable_open_curve(self, context)
         if curve_obj is None:
-            self.report({"ERROR"}, "Active object must be a Curve.")
             return {"CANCELLED"}
 
-        if not _bake_current_twist_to_minimum(context, curve_obj):
-            self.report({"ERROR"}, "Active curve has no editable spline with at least 2 points.")
-            return {"CANCELLED"}
-
+        _store_twist_lock_state(curve_obj, False)
         context.view_layer.update()
-        self.report({"INFO"}, "Unlocked twist and preserved current state.")
+        self.report({"INFO"}, f"Unlocked twist for {len(splines)} splines.")
         return {"FINISHED"}
 
 
@@ -2210,7 +2291,7 @@ class CTK_PT_tools(bpy.types.Panel):
         settings = context.scene.curve_toolkit
         curve_obj = _active_curve(context)
         armature_obj = _active_armature(context)
-        twist_locked = curve_obj is not None and getattr(curve_obj.data, "twist_mode", "") == "Z_UP"
+        twist_locked = curve_obj is not None and _custom_bool(curve_obj, "ctk_lock_twist", "hmt_lock_twist")
         root_locked = curve_obj is not None and _custom_bool(curve_obj, "ctk_lock_root", "hmt_lock_root")
         tip_locked = curve_obj is not None and _custom_bool(curve_obj, "ctk_lock_tip", "hmt_lock_tip")
         caps_filled = curve_obj is not None and bool(getattr(curve_obj.data, "use_fill_caps", False))
@@ -2377,13 +2458,13 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.curve_toolkit = PointerProperty(type=CTK_PG_settings)
-    if _ctk_endpoint_lock_handler not in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.append(_ctk_endpoint_lock_handler)
+    if _ctk_curve_lock_handler not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(_ctk_curve_lock_handler)
 
 
 def unregister():
-    if _ctk_endpoint_lock_handler in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.remove(_ctk_endpoint_lock_handler)
+    if _ctk_curve_lock_handler in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(_ctk_curve_lock_handler)
     del bpy.types.Scene.curve_toolkit
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

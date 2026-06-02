@@ -49,8 +49,8 @@ Closed curve splines are protected from destructive edit operations.
 
 ## Locks
 
-- `Lock Twist`: bakes the current twist state into point tilt, then uses Blender's Z-Up twist mode so later point movement is more stable while manual twist remains editable.
-- `Unlock Twist`: bakes the current twist state before restoring Blender's default Minimum twist mode.
+- `Lock Twist`: stores the current twist state and preserves it when curve points move without changing Blender's twist method.
+- `Unlock Twist`: releases the toolkit twist lock without changing the current curve shape.
 - `Flip Twist`: adds 180 degrees to the current curve point twist values.
 - `Lock Root` and `Lock Tip`: store the current endpoint world position for each open spline and keep it fixed while the lock is active.
 - `Unlock Root` and `Unlock Tip`: bake the locked endpoint position into the curve before releasing the stored endpoint lock.
