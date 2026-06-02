@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Curve Toolkit",
     "author": "madan6557",
-    "version": (1, 6, 7),
+    "version": (1, 6, 8),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Curve Toolkit",
     "description": "Curve modeling tools and bone chain generation.",
@@ -664,11 +664,45 @@ def _smooth_spline_radius(spline, factor, steps):
         _set_point_radius(point, value)
 
 
+def _smooth_selected_spline_radius(spline, factor, steps):
+    return _smooth_selected_spline_scalar(spline, _point_radius, _set_point_radius, factor, steps)
+
+
 def _smooth_spline_tilt(spline, factor, steps):
     points = _spline_points(spline)
     values = [_point_tilt(point) for point in points]
     for point, value in zip(points, _smooth_values(values, factor, steps)):
         _set_point_tilt(point, value)
+
+
+def _smooth_selected_spline_tilt(spline, factor, steps):
+    return _smooth_selected_spline_scalar(spline, _point_tilt, _set_point_tilt, factor, steps)
+
+
+def _smooth_selected_spline_scalar(spline, getter, setter, factor, steps):
+    points = list(_spline_points(spline))
+    values = [getter(point) for point in points]
+    changed_indices = set()
+
+    for run in _selected_index_runs(spline):
+        if len(run) < 3:
+            continue
+
+        run_values = {index: values[index] for index in run}
+        for _ in range(steps):
+            next_values = dict(run_values)
+            for offset, index in enumerate(run[1:-1], start=1):
+                previous_index = run[offset - 1]
+                next_index = run[offset + 1]
+                target = (run_values[previous_index] + run_values[next_index]) * 0.5
+                next_values[index] = run_values[index] + (target - run_values[index]) * factor
+            run_values = next_values
+
+        for index in run[1:-1]:
+            setter(points[index], run_values[index])
+            changed_indices.add(index)
+
+    return len(changed_indices)
 
 
 def _reset_spline_radius(spline):
@@ -1908,10 +1942,28 @@ class CTK_OT_smooth_scale(bpy.types.Operator):
             return {"CANCELLED"}
 
         settings = context.scene.curve_toolkit
+        selected_mode = _has_selected_points(splines)
+        changed_count = 0
+
         for spline in splines:
-            _smooth_spline_radius(spline, settings.smooth_factor, settings.smooth_steps)
+            if selected_mode:
+                changed_count += _smooth_selected_spline_radius(
+                    spline,
+                    settings.smooth_factor,
+                    settings.smooth_steps,
+                )
+            else:
+                _smooth_spline_radius(spline, settings.smooth_factor, settings.smooth_steps)
 
         context.view_layer.update()
+        if selected_mode:
+            if changed_count == 0:
+                self.report({"ERROR"}, "Select at least 3 contiguous curve points to smooth.")
+                return {"CANCELLED"}
+
+            self.report({"INFO"}, f"Smoothed scale for {changed_count} selected curve points.")
+            return {"FINISHED"}
+
         self.report({"INFO"}, f"Smoothed scale for {len(splines)} splines.")
         return {"FINISHED"}
 
@@ -1974,10 +2026,28 @@ class CTK_OT_smooth_twist(bpy.types.Operator):
             return {"CANCELLED"}
 
         settings = context.scene.curve_toolkit
+        selected_mode = _has_selected_points(splines)
+        changed_count = 0
+
         for spline in splines:
-            _smooth_spline_tilt(spline, settings.smooth_factor, settings.smooth_steps)
+            if selected_mode:
+                changed_count += _smooth_selected_spline_tilt(
+                    spline,
+                    settings.smooth_factor,
+                    settings.smooth_steps,
+                )
+            else:
+                _smooth_spline_tilt(spline, settings.smooth_factor, settings.smooth_steps)
 
         context.view_layer.update()
+        if selected_mode:
+            if changed_count == 0:
+                self.report({"ERROR"}, "Select at least 3 contiguous curve points to smooth.")
+                return {"CANCELLED"}
+
+            self.report({"INFO"}, f"Smoothed twist for {changed_count} selected curve points.")
+            return {"FINISHED"}
+
         self.report({"INFO"}, f"Smoothed twist for {len(splines)} splines.")
         return {"FINISHED"}
 

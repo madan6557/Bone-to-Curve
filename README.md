@@ -41,9 +41,10 @@ Closed curve splines are protected from destructive edit operations.
 ## Smooth / Reset
 
 - `Factor` and `Steps` control smoothing strength.
-- `Smooth Scale`: smooths curve point radius values.
-- `Smooth Curve`: smooths selected curve points when any points are selected; otherwise smooths the full curve. Each contiguous selected range keeps its first and last selected point fixed as reference points.
-- `Smooth Twist`: smooths curve point tilt values.
+- `Smooth Scale`: smooths selected point radius values when any points are selected; otherwise smooths the full curve.
+- `Smooth Curve`: smooths selected curve points when any points are selected; otherwise smooths the full curve.
+- `Smooth Twist`: smooths selected point tilt values when any points are selected; otherwise smooths the full curve.
+- Smooth selected mode uses contiguous selected ranges and keeps each range's first and last selected point fixed as reference points.
 - `Reset Scale`: sets curve point radius values to `1.0`.
 - `Reset Curve`: uses the same behavior as `Reset Path`.
 - `Reset Twist`: sets curve point tilt values to `0`.
