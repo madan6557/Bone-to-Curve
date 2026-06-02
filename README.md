@@ -2,8 +2,6 @@
 
 Blender addon for curve modeling helpers and bone chain generation.
 
-Each major panel section is collapsible.
-
 ## Requirements
 
 - Blender 4.2 or newer
