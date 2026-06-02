@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Hair Modeling Toolkit",
     "author": "madan6557",
-    "version": (1, 4, 0),
+    "version": (1, 4, 1),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Hair Toolkit",
     "description": "Curve hair modeling tools and bone chain generation.",
@@ -1734,6 +1734,20 @@ class HMT_PT_tools(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         settings = context.scene.hair_modeling_toolkit
+        curve_obj = _active_curve(context)
+        twist_locked = curve_obj is not None and getattr(curve_obj.data, "twist_mode", "") == "Z_UP"
+        root_locked = curve_obj is not None and bool(curve_obj.get("hmt_lock_root", False))
+        tip_locked = curve_obj is not None and bool(curve_obj.get("hmt_lock_tip", False))
+        caps_filled = curve_obj is not None and bool(getattr(curve_obj.data, "use_fill_caps", False))
+        cap_root = curve_obj is not None and bool(curve_obj.get("hmt_cap_root", False))
+        cap_tip = curve_obj is not None and bool(curve_obj.get("hmt_cap_tip", False))
+        if caps_filled and not (cap_root or cap_tip):
+            cap_root = True
+            cap_tip = True
+        twist_unlocked = curve_obj is not None and not twist_locked
+        root_unlocked = curve_obj is not None and not root_locked
+        tip_unlocked = curve_obj is not None and not tip_locked
+        caps_open = curve_obj is not None and not caps_filled
 
         curve_box = layout.box()
         curve_box.label(text="Curve Controls", icon="CURVE_DATA")
@@ -1787,22 +1801,22 @@ class HMT_PT_tools(bpy.types.Panel):
         lock_box = layout.box()
         lock_box.label(text="Locks")
         row = lock_box.row(align=True)
-        row.operator(HMT_OT_lock_twist.bl_idname)
-        row.operator(HMT_OT_unlock_twist.bl_idname)
+        row.operator(HMT_OT_lock_twist.bl_idname, depress=twist_locked)
+        row.operator(HMT_OT_unlock_twist.bl_idname, depress=twist_unlocked)
 
         row = lock_box.row(align=True)
-        op = row.operator(HMT_OT_set_endpoint_lock.bl_idname, text="Lock Root")
+        op = row.operator(HMT_OT_set_endpoint_lock.bl_idname, text="Lock Root", depress=root_locked)
         op.mode = "ROOT"
         op.enabled = True
-        op = row.operator(HMT_OT_set_endpoint_lock.bl_idname, text="Unlock Root")
+        op = row.operator(HMT_OT_set_endpoint_lock.bl_idname, text="Unlock Root", depress=root_unlocked)
         op.mode = "ROOT"
         op.enabled = False
 
         row = lock_box.row(align=True)
-        op = row.operator(HMT_OT_set_endpoint_lock.bl_idname, text="Lock Tip")
+        op = row.operator(HMT_OT_set_endpoint_lock.bl_idname, text="Lock Tip", depress=tip_locked)
         op.mode = "TIP"
         op.enabled = True
-        op = row.operator(HMT_OT_set_endpoint_lock.bl_idname, text="Unlock Tip")
+        op = row.operator(HMT_OT_set_endpoint_lock.bl_idname, text="Unlock Tip", depress=tip_unlocked)
         op.mode = "TIP"
         op.enabled = False
 
@@ -1813,13 +1827,13 @@ class HMT_PT_tools(bpy.types.Panel):
         caps_box = layout.box()
         caps_box.label(text="Caps", icon="MESH_DATA")
         row = caps_box.row(align=True)
-        op = row.operator(HMT_OT_set_fill_caps.bl_idname, text="Root")
+        op = row.operator(HMT_OT_set_fill_caps.bl_idname, text="Root", depress=cap_root and not cap_tip)
         op.mode = "ROOT"
-        op = row.operator(HMT_OT_set_fill_caps.bl_idname, text="Tip")
+        op = row.operator(HMT_OT_set_fill_caps.bl_idname, text="Tip", depress=cap_tip and not cap_root)
         op.mode = "TIP"
-        op = row.operator(HMT_OT_set_fill_caps.bl_idname, text="Ends")
+        op = row.operator(HMT_OT_set_fill_caps.bl_idname, text="Ends", depress=cap_root and cap_tip)
         op.mode = "BOTH"
-        caps_box.operator(HMT_OT_set_fill_caps.bl_idname, text="Open Caps").mode = "OPEN"
+        caps_box.operator(HMT_OT_set_fill_caps.bl_idname, text="Open Caps", depress=caps_open).mode = "OPEN"
 
         rigging_box = layout.box()
         rigging_box.label(text="Rigging", icon="ARMATURE_DATA")

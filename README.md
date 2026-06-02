@@ -52,6 +52,7 @@ Closed curve splines are protected from destructive edit operations.
 - `Unlock Twist`: restores Blender's default Minimum twist mode while preserving manual point tilt.
 - `Lock Root` and `Lock Tip`: store the current endpoint world position for each open spline and keep it fixed while the lock is active.
 - `Unlock Root` and `Unlock Tip`: release the stored endpoint lock.
+- Lock buttons show their active state in the panel.
 
 ## Mirror
 
@@ -60,6 +61,7 @@ Closed curve splines are protected from destructive edit operations.
 ## Caps
 
 `Root`, `Tip`, and `Ends` close curve geometry caps without changing point radius scale. `Open Caps` disables cap filling.
+Caps buttons show the current cap state in the panel.
 
 ## Rigging
 
