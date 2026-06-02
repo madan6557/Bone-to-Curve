@@ -30,7 +30,8 @@ Closed curve splines are protected from destructive edit operations.
 
 ## Resolution Batch
 
-- `Collection`: registers a collection containing hair path curves. Child collections are included.
+- `Add Collection`: chooses a collection and registers it with the add button. Child collections are included.
+- Registered collections can be removed from the list with the remove button.
 - `Paths` and `Bevel Refs`: show how many path curves and bevel reference curves are currently detected.
 - `Path Resolution`: live updates `resolution_u` and `render_resolution_u` for every detected path curve.
 - `Bevel Reference Resolution`: live updates `resolution_u` and `render_resolution_u` for every unique curve used as a path bevel object.

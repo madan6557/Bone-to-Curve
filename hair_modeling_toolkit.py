@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Hair Modeling Toolkit",
     "author": "madan6557",
-    "version": (1, 4, 1),
+    "version": (1, 4, 2),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Hair Toolkit",
     "description": "Curve hair modeling tools and bone chain generation.",
@@ -15,7 +15,7 @@ import json
 
 import bpy
 from bpy.app.handlers import persistent
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty
+from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty
 from mathutils import Quaternion, Vector
 
 
@@ -786,12 +786,22 @@ def _collection_objects_recursive(collection):
     return objects
 
 
-def _resolution_batch_targets(collection):
-    curve_objects = [
-        obj
-        for obj in _collection_objects_recursive(collection)
-        if obj.type == "CURVE"
-    ]
+def _resolution_batch_targets_from_collections(collections):
+    seen_curve_objects = set()
+    curve_objects = []
+
+    for collection in collections:
+        for obj in _collection_objects_recursive(collection):
+            if obj.type != "CURVE":
+                continue
+
+            object_key = obj.as_pointer()
+            if object_key in seen_curve_objects:
+                continue
+
+            curve_objects.append(obj)
+            seen_curve_objects.add(object_key)
+
     bevel_reference_keys = {
         obj.data.bevel_object.as_pointer()
         for obj in curve_objects
@@ -823,6 +833,39 @@ def _resolution_batch_targets(collection):
     return path_curves, bevel_references
 
 
+def _resolution_batch_targets(collection):
+    if collection is None:
+        return [], []
+
+    return _resolution_batch_targets_from_collections([collection])
+
+
+def _resolution_batch_collections(settings):
+    collections = []
+    seen_collections = set()
+
+    for item in settings.resolution_collections:
+        collection = item.collection
+        if collection is None:
+            continue
+
+        collection_key = collection.as_pointer()
+        if collection_key in seen_collections:
+            continue
+
+        collections.append(collection)
+        seen_collections.add(collection_key)
+
+    if not collections and settings.resolution_collection is not None:
+        collections.append(settings.resolution_collection)
+
+    return collections
+
+
+def _resolution_batch_targets_from_settings(settings):
+    return _resolution_batch_targets_from_collections(_resolution_batch_collections(settings))
+
+
 def _set_curve_data_resolution(curve_obj, value):
     resolution = max(0, min(64, int(value)))
     if hasattr(curve_obj.data, "resolution_u"):
@@ -832,11 +875,11 @@ def _set_curve_data_resolution(curve_obj, value):
 
 
 def _apply_resolution_batch(settings, target):
-    collection = settings.resolution_collection
-    if collection is None:
+    collections = _resolution_batch_collections(settings)
+    if not collections:
         return 0
 
-    path_curves, bevel_references = _resolution_batch_targets(collection)
+    path_curves, bevel_references = _resolution_batch_targets_from_collections(collections)
     target_objects = path_curves if target == "PATH" else bevel_references
     value = settings.path_resolution if target == "PATH" else settings.bevel_reference_resolution
 
@@ -1167,6 +1210,14 @@ def _create_armature_from_chains(context, curve_obj, chains):
     return armature_obj, bone_count, skipped_segments
 
 
+class HMT_PG_resolution_collection_item(bpy.types.PropertyGroup):
+    collection: PointerProperty(
+        name="Collection",
+        description="Collection included in Resolution Batch",
+        type=bpy.types.Collection,
+    )
+
+
 class HMT_PG_settings(bpy.types.PropertyGroup):
     smooth_factor: FloatProperty(
         name="Factor",
@@ -1186,9 +1237,15 @@ class HMT_PG_settings(bpy.types.PropertyGroup):
     )
 
     resolution_collection: PointerProperty(
-        name="Collection",
-        description="Collection containing hair path curves",
+        name="Add Collection",
+        description="Collection to add to Resolution Batch",
         type=bpy.types.Collection,
+    )
+
+    resolution_collections: CollectionProperty(
+        name="Collections",
+        description="Collections included in Resolution Batch",
+        type=HMT_PG_resolution_collection_item,
     )
 
     path_resolution: IntProperty(
@@ -1703,6 +1760,54 @@ class HMT_OT_set_fill_caps(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class HMT_OT_add_resolution_collection(bpy.types.Operator):
+    bl_idname = "hair_modeling_toolkit.add_resolution_collection"
+    bl_label = "Add Collection"
+    bl_description = "Add the selected collection to Resolution Batch"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        settings = context.scene.hair_modeling_toolkit
+        collection = settings.resolution_collection
+        if collection is None:
+            self.report({"WARNING"}, "Choose a collection to add.")
+            return {"CANCELLED"}
+
+        collection_key = collection.as_pointer()
+        for item in settings.resolution_collections:
+            if item.collection is not None and item.collection.as_pointer() == collection_key:
+                self.report({"INFO"}, f"{collection.name} is already registered.")
+                return {"FINISHED"}
+
+        item = settings.resolution_collections.add()
+        item.collection = collection
+        _apply_resolution_batch(settings, "PATH")
+        _apply_resolution_batch(settings, "BEVEL")
+        self.report({"INFO"}, f"Added {collection.name} to Resolution Batch.")
+        return {"FINISHED"}
+
+
+class HMT_OT_remove_resolution_collection(bpy.types.Operator):
+    bl_idname = "hair_modeling_toolkit.remove_resolution_collection"
+    bl_label = "Remove Collection"
+    bl_description = "Remove a collection from Resolution Batch"
+    bl_options = {"REGISTER", "UNDO"}
+
+    index: IntProperty(name="Index", default=-1)
+
+    def execute(self, context):
+        settings = context.scene.hair_modeling_toolkit
+        if self.index < 0 or self.index >= len(settings.resolution_collections):
+            self.report({"ERROR"}, "Invalid Resolution Batch collection index.")
+            return {"CANCELLED"}
+
+        item = settings.resolution_collections[self.index]
+        collection_name = item.collection.name if item.collection is not None else "Missing Collection"
+        settings.resolution_collections.remove(self.index)
+        self.report({"INFO"}, f"Removed {collection_name} from Resolution Batch.")
+        return {"FINISHED"}
+
+
 class HMT_OT_refresh_resolution_batch(bpy.types.Operator):
     bl_idname = "hair_modeling_toolkit.refresh_resolution_batch"
     bl_label = "Refresh"
@@ -1711,15 +1816,15 @@ class HMT_OT_refresh_resolution_batch(bpy.types.Operator):
 
     def execute(self, context):
         settings = context.scene.hair_modeling_toolkit
-        collection = settings.resolution_collection
-        if collection is None:
-            self.report({"WARNING"}, "Select a collection for Resolution Batch.")
+        collections = _resolution_batch_collections(settings)
+        if not collections:
+            self.report({"WARNING"}, "Add at least one collection for Resolution Batch.")
             return {"FINISHED"}
 
-        path_curves, bevel_references = _resolution_batch_targets(collection)
+        path_curves, bevel_references = _resolution_batch_targets_from_collections(collections)
         self.report(
             {"INFO"},
-            f"Resolution Batch found {len(path_curves)} path curves and {len(bevel_references)} bevel references.",
+            f"Resolution Batch found {len(path_curves)} path curves and {len(bevel_references)} bevel references from {len(collections)} collections.",
         )
         return {"FINISHED"}
 
@@ -1776,8 +1881,22 @@ class HMT_PT_tools(bpy.types.Panel):
 
         resolution_box = layout.box()
         resolution_box.label(text="Resolution Batch", icon="OUTLINER_COLLECTION")
-        resolution_box.prop(settings, "resolution_collection")
-        path_curves, bevel_references = _resolution_batch_targets(settings.resolution_collection)
+        row = resolution_box.row(align=True)
+        row.prop(settings, "resolution_collection")
+        row.operator(HMT_OT_add_resolution_collection.bl_idname, text="", icon="ADD")
+
+        collections = _resolution_batch_collections(settings)
+        if settings.resolution_collections:
+            resolution_box.label(text=f"Collections: {len(collections)}")
+            for index, item in enumerate(settings.resolution_collections):
+                row = resolution_box.row(align=True)
+                row.label(text=item.collection.name if item.collection is not None else "Missing Collection")
+                op = row.operator(HMT_OT_remove_resolution_collection.bl_idname, text="", icon="X")
+                op.index = index
+        else:
+            resolution_box.label(text=f"Collections: {len(collections)}")
+
+        path_curves, bevel_references = _resolution_batch_targets_from_collections(collections)
         resolution_box.label(text=f"Paths: {len(path_curves)}  Bevel Refs: {len(bevel_references)}")
         resolution_box.prop(settings, "path_resolution")
         resolution_box.prop(settings, "bevel_reference_resolution")
@@ -1841,6 +1960,7 @@ class HMT_PT_tools(bpy.types.Panel):
 
 
 classes = (
+    HMT_PG_resolution_collection_item,
     HMT_PG_settings,
     HMT_OT_generate_bones_from_active_curve,
     HMT_OT_reset_path,
@@ -1858,6 +1978,8 @@ classes = (
     HMT_OT_set_endpoint_lock,
     HMT_OT_duplicate_mirror_selected_curves,
     HMT_OT_set_fill_caps,
+    HMT_OT_add_resolution_collection,
+    HMT_OT_remove_resolution_collection,
     HMT_OT_refresh_resolution_batch,
     HMT_PT_tools,
 )
