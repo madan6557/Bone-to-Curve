@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Curve Toolkit",
     "author": "madan6557",
-    "version": (1, 6, 3),
+    "version": (1, 6, 5),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Curve Toolkit",
     "description": "Curve modeling tools and bone chain generation.",
@@ -1508,6 +1508,17 @@ class CTK_PG_resolution_collection_item(bpy.types.PropertyGroup):
 
 
 class CTK_PG_settings(bpy.types.PropertyGroup):
+    show_curve_controls: BoolProperty(name="Curve Controls", default=True)
+    show_resolution_batch: BoolProperty(name="Resolution Batch", default=True)
+    show_smooth_reset: BoolProperty(name="Smooth / Reset", default=True)
+    show_locks: BoolProperty(name="Locks", default=True)
+    show_mirror: BoolProperty(name="Mirror", default=True)
+    show_caps: BoolProperty(name="Caps", default=True)
+    show_rigging: BoolProperty(name="Rigging", default=True)
+    show_rig_from_points: BoolProperty(name="From Control Points", default=True)
+    show_rig_custom_count: BoolProperty(name="Custom Count", default=True)
+    show_rig_armature_tools: BoolProperty(name="Armature Tools", default=True)
+
     smooth_factor: FloatProperty(
         name="Factor",
         description="Strength for smoothing operations",
@@ -2286,6 +2297,17 @@ class CTK_PT_tools(bpy.types.Panel):
     bl_region_type = "UI"
     bl_category = "Curve Toolkit"
 
+    @staticmethod
+    def _draw_foldout(box, settings, prop_name, text, icon=None):
+        is_open = bool(getattr(settings, prop_name))
+        row = box.row(align=True)
+        row.prop(settings, prop_name, text="", icon="TRIA_DOWN" if is_open else "TRIA_RIGHT", emboss=False)
+        if icon is None:
+            row.label(text=text)
+        else:
+            row.label(text=text, icon=icon)
+        return is_open
+
     def draw(self, context):
         layout = self.layout
         settings = context.scene.curve_toolkit
@@ -2306,123 +2328,139 @@ class CTK_PT_tools(bpy.types.Panel):
         caps_open = curve_obj is not None and not caps_filled
 
         curve_box = layout.box()
-        curve_box.label(text="Curve Controls", icon="CURVE_DATA")
-        row = curve_box.row(align=True)
-        row.operator(CTK_OT_reset_path.bl_idname)
-        row.operator(CTK_OT_reset_path_x_axis.bl_idname)
-        row.operator(CTK_OT_switch_direction.bl_idname)
+        if self._draw_foldout(curve_box, settings, "show_curve_controls", "Curve Controls", "CURVE_DATA"):
+            row = curve_box.row(align=True)
+            row.operator(CTK_OT_reset_path.bl_idname)
+            row.operator(CTK_OT_reset_path_x_axis.bl_idname)
+            row.operator(CTK_OT_switch_direction.bl_idname)
 
-        curve_box.label(text="Origin To")
-        row = curve_box.row(align=True)
-        op = row.operator(CTK_OT_set_origin.bl_idname, text="Root")
-        op.mode = "ROOT"
-        op = row.operator(CTK_OT_set_origin.bl_idname, text="Tip")
-        op.mode = "TIP"
-        op = row.operator(CTK_OT_set_origin.bl_idname, text="Center")
-        op.mode = "CENTER"
+            curve_box.label(text="Origin To")
+            row = curve_box.row(align=True)
+            op = row.operator(CTK_OT_set_origin.bl_idname, text="Root")
+            op.mode = "ROOT"
+            op = row.operator(CTK_OT_set_origin.bl_idname, text="Tip")
+            op.mode = "TIP"
+            op = row.operator(CTK_OT_set_origin.bl_idname, text="Center")
+            op.mode = "CENTER"
 
-        curve_box.label(text="3D Cursor To")
-        row = curve_box.row(align=True)
-        op = row.operator(CTK_OT_snap_cursor.bl_idname, text="Root")
-        op.mode = "ROOT"
-        op = row.operator(CTK_OT_snap_cursor.bl_idname, text="Tip")
-        op.mode = "TIP"
-        op = row.operator(CTK_OT_snap_cursor.bl_idname, text="Center")
-        op.mode = "CENTER"
+            curve_box.label(text="3D Cursor To")
+            row = curve_box.row(align=True)
+            op = row.operator(CTK_OT_snap_cursor.bl_idname, text="Root")
+            op.mode = "ROOT"
+            op = row.operator(CTK_OT_snap_cursor.bl_idname, text="Tip")
+            op.mode = "TIP"
+            op = row.operator(CTK_OT_snap_cursor.bl_idname, text="Center")
+            op.mode = "CENTER"
 
         resolution_box = layout.box()
-        resolution_box.label(text="Resolution Batch", icon="OUTLINER_COLLECTION")
-        row = resolution_box.row(align=True)
-        row.prop(settings, "resolution_collection")
-        row.operator(CTK_OT_add_resolution_collection.bl_idname, text="", icon="ADD")
+        if self._draw_foldout(resolution_box, settings, "show_resolution_batch", "Resolution Batch", "OUTLINER_COLLECTION"):
+            row = resolution_box.row(align=True)
+            row.prop(settings, "resolution_collection")
+            row.operator(CTK_OT_add_resolution_collection.bl_idname, text="", icon="ADD")
 
-        collections = _resolution_batch_collections(settings)
-        if settings.resolution_collections:
-            resolution_box.label(text=f"Collections: {len(collections)}")
-            for index, item in enumerate(settings.resolution_collections):
-                row = resolution_box.row(align=True)
-                row.label(text=item.collection.name if item.collection is not None else "Missing Collection")
-                op = row.operator(CTK_OT_remove_resolution_collection.bl_idname, text="", icon="X")
-                op.index = index
-        else:
-            resolution_box.label(text=f"Collections: {len(collections)}")
+            collections = _resolution_batch_collections(settings)
+            if settings.resolution_collections:
+                resolution_box.label(text=f"Collections: {len(collections)}")
+                for index, item in enumerate(settings.resolution_collections):
+                    row = resolution_box.row(align=True)
+                    row.label(text=item.collection.name if item.collection is not None else "Missing Collection")
+                    op = row.operator(CTK_OT_remove_resolution_collection.bl_idname, text="", icon="X")
+                    op.index = index
+            else:
+                resolution_box.label(text=f"Collections: {len(collections)}")
 
-        path_curves, bevel_references = _resolution_batch_targets_from_collections(collections)
-        resolution_box.label(text=f"Paths: {len(path_curves)}  Bevel Refs: {len(bevel_references)}")
-        resolution_box.prop(settings, "path_resolution")
-        resolution_box.prop(settings, "bevel_reference_resolution")
-        resolution_box.operator(CTK_OT_refresh_resolution_batch.bl_idname)
+            path_curves, bevel_references = _resolution_batch_targets_from_collections(collections)
+            resolution_box.label(text=f"Paths: {len(path_curves)}  Bevel Refs: {len(bevel_references)}")
+            resolution_box.prop(settings, "path_resolution")
+            resolution_box.prop(settings, "bevel_reference_resolution")
+            resolution_box.operator(CTK_OT_refresh_resolution_batch.bl_idname)
 
         smooth_box = layout.box()
-        smooth_box.label(text="Smooth / Reset", icon="MOD_SMOOTH")
-        smooth_box.prop(settings, "smooth_factor", slider=True)
-        smooth_box.prop(settings, "smooth_steps")
+        if self._draw_foldout(smooth_box, settings, "show_smooth_reset", "Smooth / Reset", "MOD_SMOOTH"):
+            smooth_box.prop(settings, "smooth_factor", slider=True)
+            smooth_box.prop(settings, "smooth_steps")
 
-        row = smooth_box.row(align=True)
-        row.operator(CTK_OT_smooth_scale.bl_idname)
-        row.operator(CTK_OT_smooth_curve.bl_idname)
-        row.operator(CTK_OT_smooth_twist.bl_idname)
+            row = smooth_box.row(align=True)
+            row.operator(CTK_OT_smooth_scale.bl_idname)
+            row.operator(CTK_OT_smooth_curve.bl_idname)
+            row.operator(CTK_OT_smooth_twist.bl_idname)
 
-        row = smooth_box.row(align=True)
-        row.operator(CTK_OT_reset_scale.bl_idname)
-        row.operator(CTK_OT_reset_path.bl_idname, text="Reset Curve")
-        row.operator(CTK_OT_reset_twist.bl_idname)
+            row = smooth_box.row(align=True)
+            row.operator(CTK_OT_reset_scale.bl_idname)
+            row.operator(CTK_OT_reset_path.bl_idname, text="Reset Curve")
+            row.operator(CTK_OT_reset_twist.bl_idname)
 
         lock_box = layout.box()
-        lock_box.label(text="Locks")
-        row = lock_box.row(align=True)
-        row.operator(CTK_OT_lock_twist.bl_idname, depress=twist_locked)
-        row.operator(CTK_OT_unlock_twist.bl_idname, depress=twist_unlocked)
-        row.operator(CTK_OT_flip_twist.bl_idname)
+        if self._draw_foldout(lock_box, settings, "show_locks", "Locks", "LOCKED"):
+            row = lock_box.row(align=True)
+            row.operator(CTK_OT_lock_twist.bl_idname, depress=twist_locked)
+            row.operator(CTK_OT_unlock_twist.bl_idname, depress=twist_unlocked)
+            row.operator(CTK_OT_flip_twist.bl_idname)
 
-        row = lock_box.row(align=True)
-        op = row.operator(CTK_OT_set_endpoint_lock.bl_idname, text="Lock Root", depress=root_locked)
-        op.mode = "ROOT"
-        op.enabled = True
-        op = row.operator(CTK_OT_set_endpoint_lock.bl_idname, text="Unlock Root", depress=root_unlocked)
-        op.mode = "ROOT"
-        op.enabled = False
+            row = lock_box.row(align=True)
+            op = row.operator(CTK_OT_set_endpoint_lock.bl_idname, text="Lock Root", depress=root_locked)
+            op.mode = "ROOT"
+            op.enabled = True
+            op = row.operator(CTK_OT_set_endpoint_lock.bl_idname, text="Unlock Root", depress=root_unlocked)
+            op.mode = "ROOT"
+            op.enabled = False
 
-        row = lock_box.row(align=True)
-        op = row.operator(CTK_OT_set_endpoint_lock.bl_idname, text="Lock Tip", depress=tip_locked)
-        op.mode = "TIP"
-        op.enabled = True
-        op = row.operator(CTK_OT_set_endpoint_lock.bl_idname, text="Unlock Tip", depress=tip_unlocked)
-        op.mode = "TIP"
-        op.enabled = False
+            row = lock_box.row(align=True)
+            op = row.operator(CTK_OT_set_endpoint_lock.bl_idname, text="Lock Tip", depress=tip_locked)
+            op.mode = "TIP"
+            op.enabled = True
+            op = row.operator(CTK_OT_set_endpoint_lock.bl_idname, text="Unlock Tip", depress=tip_unlocked)
+            op.mode = "TIP"
+            op.enabled = False
 
         mirror_box = layout.box()
-        mirror_box.label(text="Mirror", icon="MOD_MIRROR")
-        mirror_box.operator(CTK_OT_duplicate_mirror_selected_curves.bl_idname)
+        if self._draw_foldout(mirror_box, settings, "show_mirror", "Mirror", "MOD_MIRROR"):
+            mirror_box.operator(CTK_OT_duplicate_mirror_selected_curves.bl_idname)
 
         caps_box = layout.box()
-        caps_box.label(text="Caps", icon="MESH_DATA")
-        row = caps_box.row(align=True)
-        op = row.operator(CTK_OT_set_fill_caps.bl_idname, text="Root", depress=cap_root and not cap_tip)
-        op.mode = "ROOT"
-        op = row.operator(CTK_OT_set_fill_caps.bl_idname, text="Tip", depress=cap_tip and not cap_root)
-        op.mode = "TIP"
-        op = row.operator(CTK_OT_set_fill_caps.bl_idname, text="Ends", depress=cap_root and cap_tip)
-        op.mode = "BOTH"
-        caps_box.operator(CTK_OT_set_fill_caps.bl_idname, text="Open Caps", depress=caps_open).mode = "OPEN"
+        if self._draw_foldout(caps_box, settings, "show_caps", "Caps", "MESH_DATA"):
+            row = caps_box.row(align=True)
+            op = row.operator(CTK_OT_set_fill_caps.bl_idname, text="Root", depress=cap_root and not cap_tip)
+            op.mode = "ROOT"
+            op = row.operator(CTK_OT_set_fill_caps.bl_idname, text="Tip", depress=cap_tip and not cap_root)
+            op.mode = "TIP"
+            op = row.operator(CTK_OT_set_fill_caps.bl_idname, text="Ends", depress=cap_root and cap_tip)
+            op.mode = "BOTH"
+            caps_box.operator(CTK_OT_set_fill_caps.bl_idname, text="Open Caps", depress=caps_open).mode = "OPEN"
 
         rigging_box = layout.box()
-        rigging_box.label(text="Rigging", icon="ARMATURE_DATA")
-        rigging_box.prop(settings, "rig_bone_count")
-        rigging_box.prop(settings, "rig_fill_mode")
-        node_row = rigging_box.row(align=True)
-        node_row.enabled = settings.rig_fill_mode != "END_TO_END"
-        node_row.prop(settings, "rig_start_node")
-        node_row.prop(settings, "rig_end_node")
+        if self._draw_foldout(rigging_box, settings, "show_rigging", "Rigging", "ARMATURE_DATA"):
+            if self._draw_foldout(rigging_box, settings, "show_rig_from_points", "From Control Points"):
+                control_point_column = rigging_box.column(align=True)
+                control_point_column.enabled = curve_obj is not None
+                control_point_column.operator(
+                    CTK_OT_generate_bones_from_active_curve.bl_idname,
+                    text="Generate From Points",
+                    icon="ARMATURE_DATA",
+                )
 
-        generate_column = rigging_box.column(align=True)
-        generate_column.enabled = curve_obj is not None
-        generate_column.operator(CTK_OT_generate_bones_from_active_curve.bl_idname, icon="ARMATURE_DATA")
-        generate_column.operator(CTK_OT_generate_custom_bones_from_active_curve.bl_idname, icon="ARMATURE_DATA")
+            rigging_box.separator()
+            if self._draw_foldout(rigging_box, settings, "show_rig_custom_count", "Custom Count"):
+                rigging_box.prop(settings, "rig_bone_count")
+                rigging_box.prop(settings, "rig_fill_mode")
+                node_row = rigging_box.row(align=True)
+                node_row.enabled = settings.rig_fill_mode != "END_TO_END"
+                node_row.prop(settings, "rig_start_node")
+                node_row.prop(settings, "rig_end_node")
 
-        invert_row = rigging_box.row(align=True)
-        invert_row.enabled = armature_obj is not None
-        invert_row.operator(CTK_OT_invert_selected_bones.bl_idname)
+                custom_column = rigging_box.column(align=True)
+                custom_column.enabled = curve_obj is not None
+                custom_column.operator(
+                    CTK_OT_generate_custom_bones_from_active_curve.bl_idname,
+                    text="Generate Custom Count",
+                    icon="ARMATURE_DATA",
+                )
+
+            rigging_box.separator()
+            if self._draw_foldout(rigging_box, settings, "show_rig_armature_tools", "Armature Tools"):
+                invert_row = rigging_box.row(align=True)
+                invert_row.enabled = armature_obj is not None
+                invert_row.operator(CTK_OT_invert_selected_bones.bl_idname)
 
 
 classes = (

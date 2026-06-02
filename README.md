@@ -2,6 +2,8 @@
 
 Blender addon for curve modeling helpers and bone chain generation.
 
+Each major panel section is collapsible. The `Rigging` section also has collapsible subsections for point-based generation, custom-count generation, and armature tools.
+
 ## Requirements
 
 - Blender 4.2 or newer
@@ -71,7 +73,11 @@ Caps buttons show the current cap state in the panel.
 
 The number of bones follows the number of control points. Bone positions are resampled along Blender's evaluated curve path, so Bezier and NURBS path curves follow their visible shape instead of drawing straight lines between control points.
 
+In the panel this is shown under `From Control Points` with the `Generate From Points` button.
+
 `Generate Custom Bones` creates a new armature with the chosen `Bone Count`. `0` follows the target node interval count.
+
+In the panel this is shown under `Custom Count` with the `Generate Custom Count` button.
 
 - `End To End`: ignores target nodes and fills from curve root to tip.
 - `From Root`: starts from the root side of the target node range.
