@@ -14,6 +14,8 @@ Blender addon for curve modeling helpers and bone chain generation.
 3. Use `Install from Disk` and select the zip.
 4. Enable `Curve Toolkit`.
 
+Uninstall older builds before installing this version if the extension id changed.
+
 ## Curve Controls
 
 The panel is available at `View3D > Sidebar > Curve Toolkit`.
@@ -45,7 +47,7 @@ Closed curve splines are protected from destructive edit operations.
 
 ## Profile / Taper
 
-- Radius presets: `Flat`, `Root Thick`, `Tip Thin`, `Both Thin`, and `Anime Spike`.
+- Radius presets: `Flat`, `Root Thick`, `Tip Thin`, `Both Thin`, and `Sharp Taper`.
 - `Root`, `Middle`, and `Tip` control preset radius values.
 - `Apply Profile`: applies the preset to selected curves or selected point ranges.
 - `Copy Profile` and `Paste Profile`: copy the active curve's radius profile and resample it onto selected curves.
@@ -87,7 +89,7 @@ Closed curve splines are protected from destructive edit operations.
 
 ## Validation
 
-- `Check Hair Curves`: checks selected curves, or all scene curves if none are selected.
+- `Check Curves`: checks selected curves, or all scene curves if none are selected.
 - The report counts missing bevel objects, zero-length splines, overlapping points, non-applied object scale, closed splines, and active twist locks.
 - `Select Problems`: selects curves found by the latest validation.
 
@@ -112,7 +114,7 @@ Caps buttons show the current cap state in the panel.
 ## Convert / Bridge
 
 - `Export Mesh Copy`: creates evaluated mesh copies of selected curves in a separate collection without deleting or converting the originals.
-- `Hair Curves to Curve`: converts an active Blender Hair Curves object into a legacy Curve object so the toolkit can edit it.
+- `Curves Object to Curve`: converts an active Blender Curves object into a legacy Curve object so the toolkit can edit it.
 
 ## Rigging
 

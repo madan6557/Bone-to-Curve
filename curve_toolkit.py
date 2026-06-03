@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Curve Toolkit",
     "author": "madan6557",
-    "version": (1, 7, 0),
+    "version": (1, 7, 1),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Curve Toolkit",
     "description": "Curve modeling tools and bone chain generation.",
@@ -455,7 +455,7 @@ def _profile_radius_value(preset, factor, root_radius, tip_radius, mid_radius):
         middle = 1.0 - abs(2.0 * factor - 1.0)
         edge = tip_radius
         return edge + (mid_radius - edge) * middle
-    if preset == "ANIME_SPIKE":
+    if preset == "SHARP_TAPER":
         if factor < 0.35:
             local_factor = factor / 0.35
             return root_radius + (mid_radius - root_radius) * local_factor
@@ -1910,7 +1910,7 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
             ("ROOT_THICK", "Root Thick", "Taper from root radius to tip radius"),
             ("TIP_THIN", "Tip Thin", "Alias taper profile for a thin tip"),
             ("BOTH_THIN", "Both Thin", "Thin root and tip with a thicker middle"),
-            ("ANIME_SPIKE", "Anime Spike", "Build a sharp stylized strand profile"),
+            ("SHARP_TAPER", "Sharp Taper", "Build a sharp stylized curve profile"),
         ),
         default="ROOT_THICK",
     )
@@ -3186,7 +3186,7 @@ class CTK_OT_bevel_select_same(bpy.types.Operator):
 
 class CTK_OT_validate_curves(bpy.types.Operator):
     bl_idname = "curve_toolkit.validate_curves"
-    bl_label = "Check Hair Curves"
+    bl_label = "Check Curves"
     bl_description = "Validate selected curves and summarize common workflow issues"
     bl_options = {"REGISTER"}
 
@@ -3255,7 +3255,7 @@ class CTK_OT_select_validation_problems(bpy.types.Operator):
             names = []
 
         if not names:
-            self.report({"ERROR"}, "Run Check Hair Curves first.")
+            self.report({"ERROR"}, "Run Check Curves first.")
             return {"CANCELLED"}
 
         count = 0
@@ -3443,10 +3443,10 @@ class CTK_OT_convert_curves_to_mesh(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class CTK_OT_convert_hair_curves_to_curve(bpy.types.Operator):
-    bl_idname = "curve_toolkit.convert_hair_curves_to_curve"
-    bl_label = "Hair Curves to Curve"
-    bl_description = "Convert active Hair Curves object to a legacy Curve object for Curve Toolkit tools"
+class CTK_OT_convert_curves_object_to_curve(bpy.types.Operator):
+    bl_idname = "curve_toolkit.convert_curves_object_to_curve"
+    bl_label = "Curves Object to Curve"
+    bl_description = "Convert active Curves object to a legacy Curve object for Curve Toolkit tools"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -3458,7 +3458,7 @@ class CTK_OT_convert_hair_curves_to_curve(bpy.types.Operator):
         source_obj = context.view_layer.objects.active
         source_data = source_obj.data
         if len(source_data.curves) == 0:
-            self.report({"ERROR"}, "Active Hair Curves object has no curves.")
+            self.report({"ERROR"}, "Active Curves object has no curves.")
             return {"CANCELLED"}
 
         curve_data = bpy.data.curves.new(_unique_name(f"{source_obj.name}_curve", bpy.data.curves.keys()), "CURVE")
@@ -3478,14 +3478,14 @@ class CTK_OT_convert_hair_curves_to_curve(bpy.types.Operator):
 
         if not curve_data.splines:
             bpy.data.curves.remove(curve_data)
-            self.report({"ERROR"}, "Hair Curves object has no curve with at least 2 points.")
+            self.report({"ERROR"}, "Curves object has no curve with at least 2 points.")
             return {"CANCELLED"}
 
         curve_obj = bpy.data.objects.new(_unique_name(f"{source_obj.name}_curve", bpy.data.objects.keys()), curve_data)
         curve_obj.matrix_world = source_obj.matrix_world.copy()
         _link_target_collection(context, source_obj).objects.link(curve_obj)
         _set_active_only(context, curve_obj)
-        self.report({"INFO"}, f"Converted Hair Curves to {curve_obj.name}.")
+        self.report({"INFO"}, f"Converted Curves object to {curve_obj.name}.")
         return {"FINISHED"}
 
 
@@ -3822,7 +3822,7 @@ class CTK_PT_tools(bpy.types.Panel):
         if self._draw_foldout(convert_box, settings, "show_convert_tools", "Convert / Bridge", "MESH_DATA"):
             convert_box.prop(settings, "export_collection_name")
             convert_box.operator(CTK_OT_convert_curves_to_mesh.bl_idname)
-            convert_box.operator(CTK_OT_convert_hair_curves_to_curve.bl_idname)
+            convert_box.operator(CTK_OT_convert_curves_object_to_curve.bl_idname)
 
         rigging_box = layout.box()
         if self._draw_foldout(rigging_box, settings, "show_rigging", "Rigging", "ARMATURE_DATA"):
@@ -3885,7 +3885,7 @@ classes = (
     CTK_OT_select_curve_points,
     CTK_OT_select_curves_by_length,
     CTK_OT_convert_curves_to_mesh,
-    CTK_OT_convert_hair_curves_to_curve,
+    CTK_OT_convert_curves_object_to_curve,
     CTK_OT_bind_hooks_to_armature,
     CTK_OT_clear_hook_modifiers,
     CTK_OT_generate_bones_from_active_curve,
