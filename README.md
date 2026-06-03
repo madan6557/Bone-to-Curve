@@ -35,11 +35,7 @@ Raw Distribution:
 
 - `Distribution`: chooses `Evenly` or `Curve`.
 - `Curvature Bias`: controls how strongly `Curve` distribution concentrates points in curved areas. The slider is active only when `Curve` is selected.
-- `Apply Distribution`: redistributes control points along the current evaluated visual path using the selected distribution mode.
-
-Fit:
-
-- `Fit To Visual Path`: moves the control path closer to the current evaluated visual path without changing point count.
+- `Apply Distribution`: redistributes control points along the current control path using the selected distribution mode.
 
 Subdivide:
 
@@ -47,7 +43,11 @@ Subdivide:
 - `Sub Distribution`: optionally redistributes the subdivided selection with `None`, `Evenly`, or `Curve`.
 - `Subdivide Selected`: inserts conventional cuts between selected points, then applies the chosen sub distribution when it is not `None`.
 
-Distribution and fit tools use selected contiguous point ranges when points are selected. If no points are selected, they process the whole open spline. `Subdivide Selected` requires at least 3 contiguous selected points. `None` sub distribution keeps subdivision conventional. `Evenly` and `Curve` sub distribution redistribute the selected subdivided range after cuts are inserted. Segment Control keeps object transforms, bevel references, caps, materials, radius profile, and twist profile stable.
+Fit:
+
+- `Fit To Visual Path`: moves the control path closer to the current evaluated visual path without changing point count.
+
+Distribution and fit tools use selected contiguous point ranges when points are selected. If no points are selected, they process the whole open spline. Distribution modes preserve radius and twist profiles while moving control point placement along the current control path. `Subdivide Selected` requires at least 3 contiguous selected points. `None` sub distribution keeps subdivision conventional. `Evenly` and `Curve` sub distribution redistribute the selected subdivided range after cuts are inserted. `Fit To Visual Path` is separate because it intentionally moves controls to the evaluated path and can change shape. Segment Control keeps object transforms, bevel references, caps, and materials stable.
 
 ## Surface Tools
 

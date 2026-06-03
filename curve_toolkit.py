@@ -993,6 +993,25 @@ def _segment_distribution_distances(path_points, source_distances, point_count, 
     ]
 
 
+def _path_sequential_distances(path_points):
+    distances = [0.0]
+    for index in range(len(path_points) - 1):
+        distances.append(distances[-1] + (path_points[index + 1] - path_points[index]).length)
+    return distances
+
+
+def _distribution_path_for_indices(context, curve_obj, spline, indices, mode, path_points=None):
+    if mode == "FIT":
+        if path_points is None:
+            path_points = _evaluated_spline_path_points(context, curve_obj, spline)
+        source_distances = _control_distances_on_path(curve_obj, spline, indices, path_points)
+        return path_points, source_distances
+
+    points = list(_spline_points(spline))
+    control_path = [_point_world_co(curve_obj, spline, points[index]) for index in indices]
+    return control_path, _path_sequential_distances(control_path)
+
+
 def _affected_bezier_indices(point_count, indices):
     affected = set()
     for index in indices:
@@ -1008,13 +1027,11 @@ def _apply_segment_distribution(context, curve_obj, spline, indices, mode, curva
     if len(indices) < 2:
         return 0
 
-    if path_points is None:
-        path_points = _evaluated_spline_path_points(context, curve_obj, spline)
+    path_points, source_distances = _distribution_path_for_indices(context, curve_obj, spline, indices, mode, path_points)
     if len(path_points) < 2 or not _has_valid_segment(path_points):
         return 0
 
     points = list(_spline_points(spline))
-    source_distances = _control_distances_on_path(curve_obj, spline, indices, path_points)
     target_distances = _segment_distribution_distances(
         path_points,
         source_distances,
@@ -1034,7 +1051,7 @@ def _apply_segment_distribution(context, curve_obj, spline, indices, mode, curva
         _set_point_radius(point, _sample_scalar_by_distance(source_distances, radii, target_distance))
         _set_point_tilt(point, _sample_scalar_by_distance(source_distances, tilts, target_distance))
 
-    if spline.type == "BEZIER":
+    if mode == "FIT" and spline.type == "BEZIER":
         _reset_bezier_handles_for_indices(spline, _affected_bezier_indices(len(points), indices))
 
     return len(indices)
@@ -4381,8 +4398,9 @@ class CTK_PT_tools(bpy.types.Panel):
 
         segment_box = layout.box()
         if self._draw_foldout(segment_box, settings, "show_segment_control", "Segment Control", "IPO_EASE_IN_OUT"):
-            segment_column = segment_box.column(align=True)
+            segment_column = segment_box.column(align=False)
             segment_column.enabled = curve_obj is not None
+
             segment_column.label(text="Raw Distribution")
             segment_column.prop(settings, "distribution_mode")
             bias_row = segment_column.row(align=True)
@@ -4392,10 +4410,6 @@ class CTK_PT_tools(bpy.types.Panel):
             op.mode = settings.distribution_mode
 
             segment_column.separator()
-            segment_column.label(text="Fit")
-            op = segment_column.operator(CTK_OT_segment_distribute.bl_idname, text="Fit To Visual Path")
-            op.mode = "FIT"
-
             segment_column.separator()
             segment_column.label(text="Subdivide")
             segment_column.prop(settings, "subdivide_cuts")
@@ -4404,6 +4418,12 @@ class CTK_PT_tools(bpy.types.Panel):
             bias_row.enabled = settings.subdivide_distribution == "CURVE"
             bias_row.prop(settings, "curvature_bias", slider=True)
             segment_column.operator(CTK_OT_segment_subdivide_selected.bl_idname)
+
+            segment_column.separator()
+            segment_column.separator()
+            segment_column.label(text="Fit")
+            op = segment_column.operator(CTK_OT_segment_distribute.bl_idname, text="Fit To Visual Path")
+            op.mode = "FIT"
 
         surface_box = layout.box()
         if self._draw_foldout(surface_box, settings, "show_surface_tools", "Surface Tools", "MOD_SHRINKWRAP"):
