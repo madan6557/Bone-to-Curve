@@ -1087,83 +1087,169 @@ def _lerp_value(first, second, factor):
     return first + (second - first) * factor
 
 
-def _sampled_visual_subdivide_state(curve_obj, spline, path_points, source_distances, radii, tilts, weights, softbody_weights, distance):
-    co = curve_obj.matrix_world.inverted() @ _point_at_distance(path_points, distance)
+def _bezier_lerp(first, second, factor):
+    return first.lerp(second, factor)
+
+
+def _split_bezier_cubic(cubic, factor):
+    p0, p1, p2, p3 = cubic
+    p01 = _bezier_lerp(p0, p1, factor)
+    p12 = _bezier_lerp(p1, p2, factor)
+    p23 = _bezier_lerp(p2, p3, factor)
+    p012 = _bezier_lerp(p01, p12, factor)
+    p123 = _bezier_lerp(p12, p23, factor)
+    p0123 = _bezier_lerp(p012, p123, factor)
+    return (p0, p01, p012, p0123), (p0123, p123, p23, p3)
+
+
+def _subdivide_bezier_cubic(cubic, cuts):
+    subcurves = []
+    remaining = cubic
+    previous_factor = 0.0
+
+    for cut_index in range(1, cuts + 1):
+        factor = cut_index / (cuts + 1)
+        local_factor = (factor - previous_factor) / (1.0 - previous_factor)
+        left, remaining = _split_bezier_cubic(remaining, local_factor)
+        subcurves.append(left)
+        previous_factor = factor
+
+    subcurves.append(remaining)
+    return subcurves
+
+
+def _bezier_subdivide_state(point, co, handle_left, handle_right, left_type, right_type, factor, other_point=None):
+    if other_point is None:
+        radius = _point_radius(point)
+        tilt = _point_tilt(point)
+        weight_softbody = getattr(point, "weight_softbody", 0.0)
+    else:
+        radius = _lerp_value(_point_radius(point), _point_radius(other_point), factor)
+        tilt = _lerp_value(_point_tilt(point), _point_tilt(other_point), factor)
+        weight_softbody = _lerp_value(
+            getattr(point, "weight_softbody", 0.0),
+            getattr(other_point, "weight_softbody", 0.0),
+            factor,
+        )
+
     state = {
         "co": co.copy(),
-        "radius": _sample_scalar_by_distance(source_distances, radii, distance),
-        "tilt": _sample_scalar_by_distance(source_distances, tilts, distance),
+        "handle_left": handle_left.copy(),
+        "handle_right": handle_right.copy(),
+        "handle_left_type": left_type,
+        "handle_right_type": right_type,
+        "radius": radius,
+        "tilt": tilt,
         "selected": True,
-        "weight_softbody": _sample_scalar_by_distance(source_distances, softbody_weights, distance),
-        "reset_left": True,
-        "reset_right": True,
+        "weight_softbody": weight_softbody,
+        "reset_left": False,
+        "reset_right": False,
     }
-
-    if spline.type == "BEZIER":
-        state.update(
-            {
-                "handle_left": co.copy(),
-                "handle_right": co.copy(),
-                "handle_left_type": "FREE",
-                "handle_right_type": "FREE",
-            }
-        )
-    else:
-        state["weight"] = _sample_scalar_by_distance(source_distances, weights, distance)
 
     return state
 
 
-def _visual_subdivide_states_for_run(curve_obj, spline, points, run, cuts, path_points):
-    if len(path_points) < 2 or not _has_valid_segment(path_points):
-        return []
-
-    source_distances = _control_distances_on_path(curve_obj, spline, run, path_points)
-    if len(source_distances) != len(run):
-        return []
-
-    run_points = [points[index] for index in run]
-    radii = [_point_radius(point) for point in run_points]
-    tilts = [_point_tilt(point) for point in run_points]
-    softbody_weights = [getattr(point, "weight_softbody", 0.0) for point in run_points]
-    weights = [float(point.co[3]) for point in run_points] if spline.type != "BEZIER" else []
+def _conventional_bezier_states_for_run(points, run, cuts):
     states = []
 
-    for offset in range(len(run_points) - 1):
-        start_distance = source_distances[offset]
-        end_distance = source_distances[offset + 1]
-        if end_distance - start_distance <= MIN_BONE_LENGTH:
-            return []
+    for offset in range(len(run) - 1):
+        start_point = points[run[offset]]
+        end_point = points[run[offset + 1]]
+        cubic = (
+            start_point.co.copy(),
+            start_point.handle_right.copy(),
+            end_point.handle_left.copy(),
+            end_point.co.copy(),
+        )
+        subcurves = _subdivide_bezier_cubic(cubic, cuts)
+        segment_states = []
+
+        for index in range(len(subcurves) + 1):
+            factor = index / len(subcurves)
+            if index == 0:
+                segment_states.append(
+                    _bezier_subdivide_state(
+                        start_point,
+                        subcurves[0][0],
+                        start_point.handle_left,
+                        subcurves[0][1],
+                        start_point.handle_left_type,
+                        "FREE",
+                        0.0,
+                    )
+                )
+            elif index == len(subcurves):
+                segment_states.append(
+                    _bezier_subdivide_state(
+                        end_point,
+                        subcurves[-1][3],
+                        subcurves[-1][2],
+                        end_point.handle_right,
+                        "FREE",
+                        end_point.handle_right_type,
+                        1.0,
+                    )
+                )
+            else:
+                segment_states.append(
+                    _bezier_subdivide_state(
+                        start_point,
+                        subcurves[index - 1][3],
+                        subcurves[index - 1][2],
+                        subcurves[index][1],
+                        "FREE",
+                        "FREE",
+                        factor,
+                        end_point,
+                    )
+                )
+
+        if offset > 0:
+            states[-1]["handle_right"] = segment_states[0]["handle_right"]
+            states[-1]["handle_right_type"] = segment_states[0]["handle_right_type"]
+            segment_states = segment_states[1:]
+
+        states.extend(segment_states)
+
+    return states
+
+
+def _interpolated_point_subdivide_state(spline, first_point, second_point, factor):
+    first_co = _point_local_co(first_point, spline)
+    second_co = _point_local_co(second_point, spline)
+    co = first_co.lerp(second_co, factor)
+    state = {
+        "co": co,
+        "radius": _lerp_value(_point_radius(first_point), _point_radius(second_point), factor),
+        "tilt": _lerp_value(_point_tilt(first_point), _point_tilt(second_point), factor),
+        "selected": True,
+        "weight_softbody": _lerp_value(
+            getattr(first_point, "weight_softbody", 0.0),
+            getattr(second_point, "weight_softbody", 0.0),
+            factor,
+        ),
+        "reset_left": False,
+        "reset_right": False,
+        "weight": _lerp_value(float(first_point.co[3]), float(second_point.co[3]), factor),
+    }
+    return state
+
+
+def _conventional_point_states_for_run(spline, points, run, cuts):
+    states = []
+
+    for offset in range(len(run) - 1):
+        first_point = points[run[offset]]
+        second_point = points[run[offset + 1]]
 
         if offset == 0:
-            states.append(_spline_point_state(spline, run_points[0], selected=True, reset_right=True))
+            states.append(_spline_point_state(spline, first_point, selected=True))
 
         for cut_index in range(1, cuts + 1):
             factor = cut_index / (cuts + 1)
-            target_distance = start_distance + (end_distance - start_distance) * factor
-            states.append(
-                _sampled_visual_subdivide_state(
-                    curve_obj,
-                    spline,
-                    path_points,
-                    source_distances,
-                    radii,
-                    tilts,
-                    weights,
-                    softbody_weights,
-                    target_distance,
-                )
-            )
+            states.append(_interpolated_point_subdivide_state(spline, first_point, second_point, factor))
 
-        states.append(
-            _spline_point_state(
-                spline,
-                run_points[offset + 1],
-                selected=True,
-                reset_left=True,
-                reset_right=offset < len(run_points) - 2,
-            )
-        )
+        states.append(_spline_point_state(spline, second_point, selected=True))
 
     return states
 
@@ -1225,16 +1311,45 @@ def _rebuild_points_spline_from_subdivide_states(spline, states):
             point.weight_softbody = state["weight_softbody"]
 
 
-def _subdivide_selected_spline(context, curve_obj, spline, cuts):
+def _apply_subdivide_distribution(context, curve_obj, spline, mode, curvature_bias, path_points):
+    if mode == "NONE":
+        return 0
+    if len(path_points) < 2 or not _has_valid_segment(path_points):
+        return 0
+
+    changed_count = 0
+    for run in _selected_index_runs(spline):
+        if len(run) < 2:
+            continue
+        changed_count += _apply_segment_distribution(
+            context,
+            curve_obj,
+            spline,
+            run,
+            mode,
+            curvature_bias,
+            path_points,
+        )
+
+    return changed_count
+
+
+def _subdivide_selected_spline(context, curve_obj, spline, cuts, distribution_mode, curvature_bias):
     points = list(_spline_points(spline))
     runs = [run for run in _selected_index_runs(spline) if len(run) >= 3]
     if not runs:
         return 0
 
-    path_points = _evaluated_spline_path_points(context, curve_obj, spline)
+    path_points = []
+    if distribution_mode != "NONE":
+        path_points = _evaluated_spline_path_points(context, curve_obj, spline)
+
     replacements = {}
     for run in runs:
-        states = _visual_subdivide_states_for_run(curve_obj, spline, points, run, cuts, path_points)
+        if spline.type == "BEZIER":
+            states = _conventional_bezier_states_for_run(points, run, cuts)
+        else:
+            states = _conventional_point_states_for_run(spline, points, run, cuts)
         if states:
             replacements[run[0]] = (run[-1], states)
 
@@ -1263,6 +1378,7 @@ def _subdivide_selected_spline(context, curve_obj, spline, cuts):
     else:
         _rebuild_points_spline_from_subdivide_states(spline, rebuilt_states)
 
+    _apply_subdivide_distribution(context, curve_obj, spline, distribution_mode, curvature_bias, path_points)
     return added_count
 
 
@@ -2359,6 +2475,27 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
         subtype="FACTOR",
     )
 
+    distribution_mode: EnumProperty(
+        name="Distribution",
+        description="Distribution mode for Apply Distribution",
+        items=(
+            ("EVEN", "Evenly", "Space points evenly along the visual path"),
+            ("CURVE", "Curve", "Space points with extra density in curved areas"),
+        ),
+        default="EVEN",
+    )
+
+    subdivide_distribution: EnumProperty(
+        name="Sub Distribution",
+        description="Optional distribution applied after conventional subdivision",
+        items=(
+            ("NONE", "None", "Insert cuts without redistributing points"),
+            ("EVEN", "Evenly", "Redistribute subdivided points evenly along the visual path"),
+            ("CURVE", "Curve", "Redistribute subdivided points with extra density in curved areas"),
+        ),
+        default="NONE",
+    )
+
     subdivide_cuts: IntProperty(
         name="Subdivide Cuts",
         description="Number of new points inserted between each selected segment",
@@ -2893,7 +3030,7 @@ class CTK_OT_segment_distribute(bpy.types.Operator):
 class CTK_OT_segment_subdivide_selected(bpy.types.Operator):
     bl_idname = "curve_toolkit.segment_subdivide_selected"
     bl_label = "Subdivide Selected"
-    bl_description = "Insert visual-path cuts between selected points without moving the selected points"
+    bl_description = "Insert conventional cuts between selected points with optional distribution"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -2913,7 +3050,14 @@ class CTK_OT_segment_subdivide_selected(bpy.types.Operator):
             selected_runs = _selected_index_runs(spline)
             if selected_runs:
                 has_selected_points = True
-            added_count += _subdivide_selected_spline(context, curve_obj, spline, settings.subdivide_cuts)
+            added_count += _subdivide_selected_spline(
+                context,
+                curve_obj,
+                spline,
+                settings.subdivide_cuts,
+                settings.subdivide_distribution,
+                settings.curvature_bias,
+            )
 
         if added_count == 0:
             if not has_selected_points:
@@ -4239,19 +4383,26 @@ class CTK_PT_tools(bpy.types.Panel):
         if self._draw_foldout(segment_box, settings, "show_segment_control", "Segment Control", "IPO_EASE_IN_OUT"):
             segment_column = segment_box.column(align=True)
             segment_column.enabled = curve_obj is not None
-            segment_column.label(text="Distribution")
-            segment_column.prop(settings, "curvature_bias", slider=True)
-            row = segment_column.row(align=True)
-            op = row.operator(CTK_OT_segment_distribute.bl_idname, text="Distribute Evenly")
-            op.mode = "EVEN"
-            op = row.operator(CTK_OT_segment_distribute.bl_idname, text="Distribute Curve")
-            op.mode = "CURVE"
+            segment_column.label(text="Raw Distribution")
+            segment_column.prop(settings, "distribution_mode")
+            bias_row = segment_column.row(align=True)
+            bias_row.enabled = settings.distribution_mode == "CURVE"
+            bias_row.prop(settings, "curvature_bias", slider=True)
+            op = segment_column.operator(CTK_OT_segment_distribute.bl_idname, text="Apply Distribution")
+            op.mode = settings.distribution_mode
+
+            segment_column.separator()
+            segment_column.label(text="Fit")
             op = segment_column.operator(CTK_OT_segment_distribute.bl_idname, text="Fit To Visual Path")
             op.mode = "FIT"
 
             segment_column.separator()
             segment_column.label(text="Subdivide")
             segment_column.prop(settings, "subdivide_cuts")
+            segment_column.prop(settings, "subdivide_distribution")
+            bias_row = segment_column.row(align=True)
+            bias_row.enabled = settings.subdivide_distribution == "CURVE"
+            bias_row.prop(settings, "curvature_bias", slider=True)
             segment_column.operator(CTK_OT_segment_subdivide_selected.bl_idname)
 
         surface_box = layout.box()

@@ -31,19 +31,23 @@ Closed curve splines are protected from destructive edit operations.
 
 ## Segment Control
 
-Distribution:
+Raw Distribution:
 
-- `Curvature Bias`: controls how strongly `Distribute Curve` concentrates points in curved areas.
-- `Distribute Evenly`: redistributes control points with even spacing along the current evaluated visual path.
-- `Distribute Curve`: redistributes control points along the current evaluated visual path with denser spacing in curved areas.
+- `Distribution`: chooses `Evenly` or `Curve`.
+- `Curvature Bias`: controls how strongly `Curve` distribution concentrates points in curved areas. The slider is active only when `Curve` is selected.
+- `Apply Distribution`: redistributes control points along the current evaluated visual path using the selected distribution mode.
+
+Fit:
+
 - `Fit To Visual Path`: moves the control path closer to the current evaluated visual path without changing point count.
 
 Subdivide:
 
 - `Subdivide Cuts`: controls how many new points are inserted between each selected segment.
-- `Subdivide Selected`: inserts visual-path cuts between selected points without moving the selected points.
+- `Sub Distribution`: optionally redistributes the subdivided selection with `None`, `Evenly`, or `Curve`.
+- `Subdivide Selected`: inserts conventional cuts between selected points, then applies the chosen sub distribution when it is not `None`.
 
-Distribution and fit tools use selected contiguous point ranges when points are selected. If no points are selected, they process the whole open spline. `Subdivide Selected` requires at least 3 contiguous selected points so the inserted cuts can be sampled from the existing visual path. Every selected point stays in place; only the new cuts are added between them. Segment Control keeps object transforms, bevel references, caps, materials, radius profile, and twist profile stable.
+Distribution and fit tools use selected contiguous point ranges when points are selected. If no points are selected, they process the whole open spline. `Subdivide Selected` requires at least 3 contiguous selected points. `None` sub distribution keeps subdivision conventional. `Evenly` and `Curve` sub distribution redistribute the selected subdivided range after cuts are inserted. Segment Control keeps object transforms, bevel references, caps, materials, radius profile, and twist profile stable.
 
 ## Surface Tools
 
