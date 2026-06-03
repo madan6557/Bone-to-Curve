@@ -1004,11 +1004,12 @@ def _affected_bezier_indices(point_count, indices):
     return affected
 
 
-def _apply_segment_distribution(context, curve_obj, spline, indices, mode, curvature_bias):
+def _apply_segment_distribution(context, curve_obj, spline, indices, mode, curvature_bias, path_points=None):
     if len(indices) < 2:
         return 0
 
-    path_points = _evaluated_spline_path_points(context, curve_obj, spline)
+    if path_points is None:
+        path_points = _evaluated_spline_path_points(context, curve_obj, spline)
     if len(path_points) < 2 or not _has_valid_segment(path_points):
         return 0
 
@@ -2764,6 +2765,7 @@ class CTK_OT_segment_distribute(bpy.types.Operator):
         changed_count = 0
 
         for spline in splines:
+            path_points = _evaluated_spline_path_points(context, curve_obj, spline)
             for run in _segment_distribution_runs(spline, selected_mode):
                 changed_count += _apply_segment_distribution(
                     context,
@@ -2772,6 +2774,7 @@ class CTK_OT_segment_distribute(bpy.types.Operator):
                     run,
                     self.mode,
                     settings.curvature_bias,
+                    path_points,
                 )
 
         if changed_count == 0:
