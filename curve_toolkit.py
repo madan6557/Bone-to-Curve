@@ -1076,6 +1076,205 @@ def _rebuild_spline_from_world_states(curve_obj, spline, states):
         _reset_bezier_handles_to_path(spline)
 
 
+def _original_bezier_state(point, selected=False):
+    return {
+        "co": point.co.copy(),
+        "handle_left": point.handle_left.copy(),
+        "handle_right": point.handle_right.copy(),
+        "handle_left_type": point.handle_left_type,
+        "handle_right_type": point.handle_right_type,
+        "radius": _point_radius(point),
+        "tilt": _point_tilt(point),
+        "selected": selected,
+        "weight_softbody": getattr(point, "weight_softbody", 0.0),
+    }
+
+
+def _bezier_lerp(first, second, factor):
+    return first.lerp(second, factor)
+
+
+def _split_bezier_cubic(cubic, factor):
+    p0, p1, p2, p3 = cubic
+    p01 = _bezier_lerp(p0, p1, factor)
+    p12 = _bezier_lerp(p1, p2, factor)
+    p23 = _bezier_lerp(p2, p3, factor)
+    p012 = _bezier_lerp(p01, p12, factor)
+    p123 = _bezier_lerp(p12, p23, factor)
+    p0123 = _bezier_lerp(p012, p123, factor)
+    return (p0, p01, p012, p0123), (p0123, p123, p23, p3)
+
+
+def _subdivide_bezier_cubic(cubic, cuts):
+    subcurves = []
+    remaining = cubic
+    previous_factor = 0.0
+
+    for cut_index in range(1, cuts + 1):
+        factor = cut_index / (cuts + 1)
+        local_factor = (factor - previous_factor) / (1.0 - previous_factor)
+        left, remaining = _split_bezier_cubic(remaining, local_factor)
+        subcurves.append(left)
+        previous_factor = factor
+
+    subcurves.append(remaining)
+    return subcurves
+
+
+def _sample_bezier_state_values(curve_obj, path_points, source_distances, radii, tilts, local_co):
+    world_co = curve_obj.matrix_world @ local_co
+    distance = _distance_on_path_nearest(path_points, world_co)
+    return (
+        _sample_scalar_by_distance(source_distances, radii, distance),
+        _sample_scalar_by_distance(source_distances, tilts, distance),
+    )
+
+
+def _bezier_states_for_subcurves(curve_obj, path_points, source_distances, radii, tilts, subcurves, start_point, end_point):
+    states = []
+
+    for index in range(len(subcurves) + 1):
+        if index == 0:
+            co = subcurves[0][0].copy()
+            handle_left = start_point.handle_left.copy()
+            handle_right = subcurves[0][1].copy()
+            left_type = start_point.handle_left_type
+            right_type = "FREE"
+            weight_softbody = getattr(start_point, "weight_softbody", 0.0)
+        elif index == len(subcurves):
+            co = subcurves[-1][3].copy()
+            handle_left = subcurves[-1][2].copy()
+            handle_right = end_point.handle_right.copy()
+            left_type = "FREE"
+            right_type = end_point.handle_right_type
+            weight_softbody = getattr(end_point, "weight_softbody", 0.0)
+        else:
+            co = subcurves[index - 1][3].copy()
+            handle_left = subcurves[index - 1][2].copy()
+            handle_right = subcurves[index][1].copy()
+            left_type = "FREE"
+            right_type = "FREE"
+            weight_softbody = 0.0
+
+        radius, tilt = _sample_bezier_state_values(curve_obj, path_points, source_distances, radii, tilts, co)
+        states.append(
+            {
+                "co": co,
+                "handle_left": handle_left,
+                "handle_right": handle_right,
+                "handle_left_type": left_type,
+                "handle_right_type": right_type,
+                "radius": radius,
+                "tilt": tilt,
+                "selected": True,
+                "weight_softbody": weight_softbody,
+            }
+        )
+
+    return states
+
+
+def _subdivide_bezier_states_for_run(curve_obj, spline, run, cuts, path_points):
+    points = list(spline.bezier_points)
+    source_distances = _control_distances_on_path(curve_obj, spline, run, path_points)
+    radii = [_point_radius(points[index]) for index in run]
+    tilts = [_point_tilt(points[index]) for index in run]
+    states = []
+
+    for offset in range(len(run) - 1):
+        start_point = points[run[offset]]
+        end_point = points[run[offset + 1]]
+        cubic = (
+            start_point.co.copy(),
+            start_point.handle_right.copy(),
+            end_point.handle_left.copy(),
+            end_point.co.copy(),
+        )
+        subcurves = _subdivide_bezier_cubic(cubic, cuts)
+        segment_states = _bezier_states_for_subcurves(
+            curve_obj,
+            path_points,
+            source_distances,
+            radii,
+            tilts,
+            subcurves,
+            start_point,
+            end_point,
+        )
+
+        if offset > 0:
+            previous_state = states[-1]
+            next_state = segment_states[0]
+            previous_state["handle_right"] = next_state["handle_right"]
+            previous_state["handle_right_type"] = next_state["handle_right_type"]
+            segment_states = segment_states[1:]
+
+        states.extend(segment_states)
+
+    return states
+
+
+def _rebuild_bezier_spline_from_states(spline, states):
+    points = spline.bezier_points
+    extra_count = len(states) - len(points)
+    if extra_count > 0:
+        points.add(extra_count)
+        points = spline.bezier_points
+
+    for point, state in zip(points, states):
+        point.co = state["co"]
+        point.handle_left = state["handle_left"]
+        point.handle_right = state["handle_right"]
+        point.handle_left_type = state["handle_left_type"]
+        point.handle_right_type = state["handle_right_type"]
+        _set_point_radius(point, state["radius"])
+        _set_point_tilt(point, state["tilt"])
+        _set_point_selection(point, spline, state["selected"])
+        if hasattr(point, "weight_softbody"):
+            point.weight_softbody = state["weight_softbody"]
+
+
+def _subdivide_selected_bezier_spline(context, curve_obj, spline, cuts):
+    points = list(spline.bezier_points)
+    runs = [run for run in _selected_index_runs(spline) if len(run) >= 2]
+    if not runs:
+        return 0
+
+    path_points = _evaluated_spline_path_points(context, curve_obj, spline)
+    if len(path_points) < 2 or not _has_valid_segment(path_points):
+        return 0
+
+    replacements = {}
+    for run in runs:
+        states = _subdivide_bezier_states_for_run(curve_obj, spline, run, cuts, path_points)
+        if not states:
+            continue
+        replacements[run[0]] = (run[-1], states)
+
+    if not replacements:
+        return 0
+
+    rebuilt_states = []
+    index = 0
+    while index < len(points):
+        replacement = replacements.get(index)
+        if replacement is not None:
+            end_index, states = replacement
+            rebuilt_states.extend(states)
+            index = end_index + 1
+            continue
+
+        rebuilt_states.append(_original_bezier_state(points[index], selected=False))
+        index += 1
+
+    added_count = len(rebuilt_states) - len(points)
+    if added_count <= 0:
+        return 0
+
+    _rebuild_bezier_spline_from_states(spline, rebuilt_states)
+    return added_count
+
+
 def _original_point_state(curve_obj, spline, point, selected=False):
     return {
         "world": _point_world_co(curve_obj, spline, point),
@@ -1126,9 +1325,109 @@ def _subdivide_states_for_run(context, curve_obj, spline, run, cuts):
     return states
 
 
+def _nurbs_point_state(point, selected=False):
+    return {
+        "co": point.co.copy(),
+        "radius": _point_radius(point),
+        "tilt": _point_tilt(point),
+        "selected": selected,
+        "weight_softbody": getattr(point, "weight_softbody", 0.0),
+    }
+
+
+def _interpolated_nurbs_point_state(first_point, second_point, factor):
+    first_co = first_point.co
+    second_co = second_point.co
+    co = first_co.lerp(second_co, factor)
+    return {
+        "co": co,
+        "radius": _point_radius(first_point) + (_point_radius(second_point) - _point_radius(first_point)) * factor,
+        "tilt": _point_tilt(first_point) + (_point_tilt(second_point) - _point_tilt(first_point)) * factor,
+        "selected": True,
+        "weight_softbody": getattr(first_point, "weight_softbody", 0.0)
+        + (getattr(second_point, "weight_softbody", 0.0) - getattr(first_point, "weight_softbody", 0.0)) * factor,
+    }
+
+
+def _nurbs_states_for_run(points, run, cuts):
+    states = []
+    for offset in range(len(run) - 1):
+        first_point = points[run[offset]]
+        second_point = points[run[offset + 1]]
+
+        if offset == 0:
+            states.append(_nurbs_point_state(first_point, selected=True))
+
+        for cut_index in range(1, cuts + 1):
+            factor = cut_index / (cuts + 1)
+            states.append(_interpolated_nurbs_point_state(first_point, second_point, factor))
+
+        states.append(_nurbs_point_state(second_point, selected=True))
+
+    return states
+
+
+def _rebuild_nurbs_spline_from_states(spline, states):
+    points = spline.points
+    extra_count = len(states) - len(points)
+    if extra_count > 0:
+        points.add(extra_count)
+        points = spline.points
+
+    for point, state in zip(points, states):
+        point.co = state["co"]
+        _set_point_radius(point, state["radius"])
+        _set_point_tilt(point, state["tilt"])
+        _set_point_selection(point, spline, state["selected"])
+        if hasattr(point, "weight_softbody"):
+            point.weight_softbody = state["weight_softbody"]
+
+
+def _subdivide_selected_nurbs_spline(_context, _curve_obj, spline, cuts):
+    points = list(spline.points)
+    runs = [run for run in _selected_index_runs(spline) if len(run) >= 2]
+    if not runs:
+        return 0
+
+    replacements = {}
+    for run in runs:
+        states = _nurbs_states_for_run(points, run, cuts)
+        if not states:
+            continue
+        replacements[run[0]] = (run[-1], states)
+
+    if not replacements:
+        return 0
+
+    rebuilt_states = []
+    index = 0
+    while index < len(points):
+        replacement = replacements.get(index)
+        if replacement is not None:
+            end_index, states = replacement
+            rebuilt_states.extend(states)
+            index = end_index + 1
+            continue
+
+        rebuilt_states.append(_nurbs_point_state(points[index], selected=False))
+        index += 1
+
+    added_count = len(rebuilt_states) - len(points)
+    if added_count <= 0:
+        return 0
+
+    _rebuild_nurbs_spline_from_states(spline, rebuilt_states)
+    return added_count
+
+
 def _subdivide_selected_spline(context, curve_obj, spline, cuts):
+    if spline.type == "BEZIER":
+        return _subdivide_selected_bezier_spline(context, curve_obj, spline, cuts)
+    if spline.type == "NURBS":
+        return _subdivide_selected_nurbs_spline(context, curve_obj, spline, cuts)
+
     points = list(_spline_points(spline))
-    runs = [run for run in _selected_index_runs(spline) if len(run) >= 3]
+    runs = [run for run in _selected_index_runs(spline) if len(run) >= 2]
     if not runs:
         return 0
 
@@ -2807,15 +3106,16 @@ class CTK_OT_segment_subdivide_selected(bpy.types.Operator):
         has_selected_points = False
 
         for spline in splines:
-            if _selected_index_runs(spline):
+            selected_runs = _selected_index_runs(spline)
+            if selected_runs:
                 has_selected_points = True
             added_count += _subdivide_selected_spline(context, curve_obj, spline, settings.subdivide_cuts)
 
         if added_count == 0:
             if not has_selected_points:
-                self.report({"ERROR"}, "Select at least 3 contiguous curve points to subdivide.")
+                self.report({"ERROR"}, "Select at least 2 contiguous curve points to subdivide.")
             else:
-                self.report({"ERROR"}, "Selected ranges must contain at least 3 contiguous points.")
+                self.report({"ERROR"}, "Selected ranges must contain at least 2 contiguous points.")
             return {"CANCELLED"}
 
         context.view_layer.update()
