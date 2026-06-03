@@ -4130,11 +4130,10 @@ class CTK_PT_tools(bpy.types.Panel):
 
         segment_box = layout.box()
         if self._draw_foldout(segment_box, settings, "show_segment_control", "Segment Control", "IPO_EASE_IN_OUT"):
-            segment_box.prop(settings, "curvature_bias", slider=True)
-            segment_box.prop(settings, "subdivide_cuts")
-
             segment_column = segment_box.column(align=True)
             segment_column.enabled = curve_obj is not None
+            segment_column.label(text="Distribution")
+            segment_column.prop(settings, "curvature_bias", slider=True)
             row = segment_column.row(align=True)
             op = row.operator(CTK_OT_segment_distribute.bl_idname, text="Distribute Evenly")
             op.mode = "EVEN"
@@ -4142,6 +4141,10 @@ class CTK_PT_tools(bpy.types.Panel):
             op.mode = "CURVE"
             op = segment_column.operator(CTK_OT_segment_distribute.bl_idname, text="Fit To Visual Path")
             op.mode = "FIT"
+
+            segment_column.separator()
+            segment_column.label(text="Subdivide")
+            segment_column.prop(settings, "subdivide_cuts")
             segment_column.operator(CTK_OT_segment_subdivide_selected.bl_idname)
 
         surface_box = layout.box()

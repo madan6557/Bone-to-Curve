@@ -31,11 +31,16 @@ Closed curve splines are protected from destructive edit operations.
 
 ## Segment Control
 
+Distribution:
+
 - `Curvature Bias`: controls how strongly `Distribute Curve` concentrates points in curved areas.
-- `Subdivide Cuts`: controls how many new points are inserted between each selected segment.
 - `Distribute Evenly`: redistributes control points with even spacing along the current evaluated visual path.
 - `Distribute Curve`: redistributes control points along the current evaluated visual path with denser spacing in curved areas.
 - `Fit To Visual Path`: moves the control path closer to the current evaluated visual path without changing point count.
+
+Subdivide:
+
+- `Subdivide Cuts`: controls how many new points are inserted between each selected segment.
 - `Subdivide Selected`: inserts points inside selected segments using samples from the evaluated visual path.
 
 Distribution and fit tools use selected contiguous point ranges when points are selected. If no points are selected, they process the whole open spline. `Subdivide Selected` requires at least 3 contiguous selected points. Segment Control keeps object transforms, bevel references, caps, materials, radius profile, and twist profile stable.
