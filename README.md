@@ -68,8 +68,8 @@ Distribution and fit tools use selected contiguous point ranges when points are 
 ## Profile / Taper
 
 - Radius presets: `Flat`, `Root Thick`, `Tip Thin`, `Both Thin`, and `Sharp Taper`.
-- `Root`, `Middle`, and `Tip` control preset radius values.
-- `Apply Profile`: applies the preset to selected curves or selected point ranges.
+- `Apply Preset`: loads the selected preset into the numeric controls and applies it to selected curves or selected point ranges.
+- `Root`, `Middle`, and `Tip` are live adjustment controls. Editing these values reapplies a custom Root-Middle-Tip profile immediately.
 - `Copy Profile` and `Paste Profile`: copy the active curve's radius profile and resample it onto selected curves.
 
 ## Resolution Batch

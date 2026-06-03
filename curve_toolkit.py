@@ -28,6 +28,7 @@ CTK_LENGTHS_KEY = "ctk_stored_lengths"
 LEGACY_ENDPOINT_LOCKS_KEY = "hmt_endpoint_locks"
 _CURVE_LOCK_HANDLER_RUNNING = False
 _RESOLUTION_BATCH_UPDATE_RUNNING = False
+_PROFILE_UPDATE_RUNNING = False
 
 
 def _unique_name(base_name, existing_names):
@@ -445,6 +446,12 @@ def _push_spline_from_surface(curve_obj, spline, surface_data, offset):
 def _profile_radius_value(preset, factor, root_radius, tip_radius, mid_radius):
     factor = max(0.0, min(1.0, factor))
 
+    if preset == "CUSTOM":
+        if factor <= 0.5:
+            local_factor = factor / 0.5
+            return root_radius + (mid_radius - root_radius) * local_factor
+        local_factor = (factor - 0.5) / 0.5
+        return mid_radius + (tip_radius - mid_radius) * local_factor
     if preset == "FLAT":
         return root_radius
     if preset == "ROOT_THICK":
@@ -486,6 +493,64 @@ def _apply_radius_profile_to_spline(spline, preset, root_radius, tip_radius, mid
         return changed
 
     return _apply_radius_profile_to_indices(points, list(range(len(points))), preset, root_radius, tip_radius, mid_radius)
+
+
+def _apply_profile_settings_to_curves(context, settings, preset=None):
+    curves = _target_curve_objects(context)
+    splines = [spline for curve_obj in curves for spline in _editable_splines(curve_obj)]
+    selected_mode = _has_selected_points(splines)
+    changed_count = 0
+    profile_preset = preset if preset is not None else settings.profile_preset
+
+    for spline in splines:
+        changed_count += _apply_radius_profile_to_spline(
+            spline,
+            profile_preset,
+            settings.profile_root_radius,
+            settings.profile_tip_radius,
+            settings.profile_mid_radius,
+            selected_mode,
+        )
+
+    if changed_count:
+        context.view_layer.update()
+
+    return changed_count
+
+
+def _profile_preset_defaults(preset):
+    if preset == "FLAT":
+        return 1.0, 1.0, 1.0
+    if preset == "ROOT_THICK":
+        return 1.0, 0.6, 0.05
+    if preset == "TIP_THIN":
+        return 0.05, 0.6, 1.0
+    if preset == "BOTH_THIN":
+        return 0.05, 1.0, 0.05
+    if preset == "SHARP_TAPER":
+        return 1.0, 0.35, 0.0
+    return 1.0, 0.6, 0.05
+
+
+def _set_profile_numeric_values(settings, root_radius, mid_radius, tip_radius):
+    settings.profile_root_radius = root_radius
+    settings.profile_mid_radius = mid_radius
+    settings.profile_tip_radius = tip_radius
+
+
+def _update_profile_numeric(settings, context):
+    global _PROFILE_UPDATE_RUNNING
+
+    if _PROFILE_UPDATE_RUNNING:
+        return
+    if context is None or not bool(_target_curve_objects(context)):
+        return
+
+    _PROFILE_UPDATE_RUNNING = True
+    try:
+        _apply_profile_settings_to_curves(context, settings, preset="CUSTOM")
+    finally:
+        _PROFILE_UPDATE_RUNNING = False
 
 
 def _sample_values(values, count):
@@ -2573,6 +2638,7 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
         default=1.0,
         min=0.0,
         precision=4,
+        update=_update_profile_numeric,
     )
 
     profile_mid_radius: FloatProperty(
@@ -2581,6 +2647,7 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
         default=0.6,
         min=0.0,
         precision=4,
+        update=_update_profile_numeric,
     )
 
     profile_tip_radius: FloatProperty(
@@ -2589,6 +2656,7 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
         default=0.05,
         min=0.0,
         precision=4,
+        update=_update_profile_numeric,
     )
 
     profile_clipboard: StringProperty(
@@ -3733,8 +3801,8 @@ class CTK_OT_length_trim(bpy.types.Operator):
 
 class CTK_OT_profile_apply(bpy.types.Operator):
     bl_idname = "curve_toolkit.profile_apply"
-    bl_label = "Apply Profile"
-    bl_description = "Apply the selected radius profile to selected curves"
+    bl_label = "Apply Preset"
+    bl_description = "Load the selected radius preset into the numeric controls and apply it"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -3743,23 +3811,16 @@ class CTK_OT_profile_apply(bpy.types.Operator):
 
     def execute(self, context):
         settings = context.scene.curve_toolkit
-        splines = []
-        for curve_obj in _target_curve_objects(context):
-            splines.extend(_editable_splines(curve_obj))
+        root_radius, mid_radius, tip_radius = _profile_preset_defaults(settings.profile_preset)
 
-        selected_mode = _has_selected_points(splines)
-        changed_count = 0
-        for spline in splines:
-            changed_count += _apply_radius_profile_to_spline(
-                spline,
-                settings.profile_preset,
-                settings.profile_root_radius,
-                settings.profile_tip_radius,
-                settings.profile_mid_radius,
-                selected_mode,
-            )
+        global _PROFILE_UPDATE_RUNNING
+        _PROFILE_UPDATE_RUNNING = True
+        try:
+            _set_profile_numeric_values(settings, root_radius, mid_radius, tip_radius)
+        finally:
+            _PROFILE_UPDATE_RUNNING = False
 
-        context.view_layer.update()
+        changed_count = _apply_profile_settings_to_curves(context, settings, preset=settings.profile_preset)
         if changed_count == 0:
             self.report({"ERROR"}, "No curve points found for radius profile.")
             return {"CANCELLED"}
@@ -4704,9 +4765,11 @@ def register():
 def unregister():
     if _ctk_curve_lock_handler in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(_ctk_curve_lock_handler)
-    del bpy.types.Scene.curve_toolkit
+    if hasattr(bpy.types.Scene, "curve_toolkit"):
+        del bpy.types.Scene.curve_toolkit
     for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
+        if hasattr(cls, "bl_rna"):
+            bpy.utils.unregister_class(cls)
 
 
 if __name__ == "__main__":
