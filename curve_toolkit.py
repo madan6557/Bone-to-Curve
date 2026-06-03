@@ -1087,21 +1087,6 @@ def _lerp_value(first, second, factor):
     return first + (second - first) * factor
 
 
-def _subdivide_target_distances(source_distances, point_count):
-    if len(source_distances) < 2 or point_count < 2:
-        return []
-
-    start_distance = source_distances[0]
-    end_distance = source_distances[-1]
-    if end_distance - start_distance <= MIN_BONE_LENGTH:
-        return []
-
-    return [
-        start_distance + (end_distance - start_distance) * index / (point_count - 1)
-        for index in range(point_count)
-    ]
-
-
 def _sampled_visual_subdivide_state(curve_obj, spline, path_points, source_distances, radii, tilts, weights, softbody_weights, distance):
     co = curve_obj.matrix_world.inverted() @ _point_at_distance(path_points, distance)
     state = {
@@ -1134,9 +1119,7 @@ def _visual_subdivide_states_for_run(curve_obj, spline, points, run, cuts, path_
         return []
 
     source_distances = _control_distances_on_path(curve_obj, spline, run, path_points)
-    target_count = len(run) + (len(run) - 1) * cuts
-    target_distances = _subdivide_target_distances(source_distances, target_count)
-    if len(target_distances) != target_count:
+    if len(source_distances) != len(run):
         return []
 
     run_points = [points[index] for index in run]
@@ -1146,19 +1129,18 @@ def _visual_subdivide_states_for_run(curve_obj, spline, points, run, cuts, path_
     weights = [float(point.co[3]) for point in run_points] if spline.type != "BEZIER" else []
     states = []
 
-    for index, target_distance in enumerate(target_distances):
-        if index == 0:
+    for offset in range(len(run_points) - 1):
+        start_distance = source_distances[offset]
+        end_distance = source_distances[offset + 1]
+        if end_distance - start_distance <= MIN_BONE_LENGTH:
+            return []
+
+        if offset == 0:
             states.append(_spline_point_state(spline, run_points[0], selected=True, reset_right=True))
-        elif index == len(target_distances) - 1:
-            states.append(
-                _spline_point_state(
-                    spline,
-                    run_points[-1],
-                    selected=True,
-                    reset_left=True,
-                )
-            )
-        else:
+
+        for cut_index in range(1, cuts + 1):
+            factor = cut_index / (cuts + 1)
+            target_distance = start_distance + (end_distance - start_distance) * factor
             states.append(
                 _sampled_visual_subdivide_state(
                     curve_obj,
@@ -1172,6 +1154,16 @@ def _visual_subdivide_states_for_run(curve_obj, spline, points, run, cuts, path_
                     target_distance,
                 )
             )
+
+        states.append(
+            _spline_point_state(
+                spline,
+                run_points[offset + 1],
+                selected=True,
+                reset_left=True,
+                reset_right=offset < len(run_points) - 2,
+            )
+        )
 
     return states
 
@@ -2901,7 +2893,7 @@ class CTK_OT_segment_distribute(bpy.types.Operator):
 class CTK_OT_segment_subdivide_selected(bpy.types.Operator):
     bl_idname = "curve_toolkit.segment_subdivide_selected"
     bl_label = "Subdivide Selected"
-    bl_description = "Insert points from the current visual path while preserving selected range endpoints"
+    bl_description = "Insert visual-path cuts between selected points without moving the selected points"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod

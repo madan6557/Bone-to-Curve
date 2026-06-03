@@ -41,9 +41,9 @@ Distribution:
 Subdivide:
 
 - `Subdivide Cuts`: controls how many new points are inserted between each selected segment.
-- `Subdivide Selected`: inserts points from the current visual path while preserving the selected range endpoints.
+- `Subdivide Selected`: inserts visual-path cuts between selected points without moving the selected points.
 
-Distribution and fit tools use selected contiguous point ranges when points are selected. If no points are selected, they process the whole open spline. `Subdivide Selected` requires at least 3 contiguous selected points so the inserted cuts can be sampled from the existing visual path. The first and last point of each selected range stay in place; interior points and new cuts are placed on the visual path to avoid straightening the shape. Segment Control keeps object transforms, bevel references, caps, materials, radius profile, and twist profile stable.
+Distribution and fit tools use selected contiguous point ranges when points are selected. If no points are selected, they process the whole open spline. `Subdivide Selected` requires at least 3 contiguous selected points so the inserted cuts can be sampled from the existing visual path. Every selected point stays in place; only the new cuts are added between them. Segment Control keeps object transforms, bevel references, caps, materials, radius profile, and twist profile stable.
 
 ## Surface Tools
 
