@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Curve Toolkit",
     "author": "madan6557",
-    "version": (1, 7, 1),
+    "version": (1, 8, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Curve Toolkit",
     "description": "Curve modeling tools and bone chain generation.",
@@ -784,6 +784,382 @@ def _resample_path_by_point_count(path_points, point_count):
         _point_at_distance(path_points, total_length * index / (point_count - 1))
         for index in range(point_count)
     ]
+
+
+def _distance_on_path_nearest(path_points, world_position):
+    if len(path_points) < 2:
+        return 0.0
+
+    target = Vector(world_position)
+    walked_distance = 0.0
+    best_distance = 0.0
+    best_squared = None
+
+    for index in range(len(path_points) - 1):
+        start = path_points[index]
+        end = path_points[index + 1]
+        segment = end - start
+        segment_length = segment.length
+
+        if segment_length <= MIN_BONE_LENGTH:
+            continue
+
+        factor = max(0.0, min(1.0, (target - start).dot(segment) / segment.length_squared))
+        projected = start + segment * factor
+        squared_distance = (target - projected).length_squared
+
+        if best_squared is None or squared_distance < best_squared:
+            best_squared = squared_distance
+            best_distance = walked_distance + segment_length * factor
+
+        walked_distance += segment_length
+
+    return best_distance
+
+
+def _fallback_node_distance(total_length, point_count, point_index):
+    if point_count < 2:
+        return 0.0
+    return total_length * point_index / (point_count - 1)
+
+
+def _monotonic_distances(distances, total_length, minimum_step=1.0e-5):
+    if not distances:
+        return []
+
+    clamped = [max(0.0, min(total_length, float(distances[0])))]
+    for distance in distances[1:]:
+        next_distance = max(0.0, min(total_length, float(distance)))
+        if next_distance <= clamped[-1]:
+            next_distance = min(total_length, clamped[-1] + minimum_step)
+        clamped.append(next_distance)
+
+    if len(clamped) > 1 and clamped[-1] - clamped[0] <= minimum_step:
+        start = clamped[0]
+        end = min(total_length, start + minimum_step * (len(clamped) - 1))
+        if end - start <= minimum_step:
+            start = max(0.0, total_length - minimum_step * (len(clamped) - 1))
+            end = total_length
+        clamped = [
+            start + (end - start) * index / (len(clamped) - 1)
+            for index in range(len(clamped))
+        ]
+
+    return clamped
+
+
+def _control_distances_on_path(curve_obj, spline, indices, path_points):
+    total_length = _polyline_length(path_points)
+    point_count = _control_point_count(spline)
+    points = list(_spline_points(spline))
+    distances = []
+
+    for index in indices:
+        if index == 0:
+            distances.append(0.0)
+            continue
+        if index == point_count - 1:
+            distances.append(total_length)
+            continue
+
+        world_position = _point_world_co(curve_obj, spline, points[index])
+        distances.append(_distance_on_path_nearest(path_points, world_position))
+
+    distances = _monotonic_distances(distances, total_length)
+    if len(distances) >= 2 and distances[-1] - distances[0] > MIN_BONE_LENGTH:
+        return distances
+
+    return [
+        _fallback_node_distance(total_length, point_count, index)
+        for index in indices
+    ]
+
+
+def _sample_scalar_by_distance(source_distances, values, target_distance):
+    if not source_distances or not values:
+        return 0.0
+    if len(source_distances) == 1:
+        return values[0]
+
+    if target_distance <= source_distances[0]:
+        return values[0]
+    if target_distance >= source_distances[-1]:
+        return values[-1]
+
+    for index in range(len(source_distances) - 1):
+        start_distance = source_distances[index]
+        end_distance = source_distances[index + 1]
+        if end_distance - start_distance <= MIN_BONE_LENGTH:
+            continue
+        if target_distance <= end_distance:
+            factor = (target_distance - start_distance) / (end_distance - start_distance)
+            return values[index] + (values[index + 1] - values[index]) * factor
+
+    return values[-1]
+
+
+def _path_weighted_distances(path_points, start_distance, end_distance, point_count, curvature_bias):
+    if point_count < 2:
+        return []
+
+    total_length = _polyline_length(path_points)
+    start_distance = max(0.0, min(total_length, start_distance))
+    end_distance = max(0.0, min(total_length, end_distance))
+    if end_distance - start_distance <= MIN_BONE_LENGTH:
+        return []
+
+    bias = max(0.0, min(1.0, float(curvature_bias)))
+    if bias <= 0.0 or len(path_points) < 3:
+        return [
+            start_distance + (end_distance - start_distance) * index / (point_count - 1)
+            for index in range(point_count)
+        ]
+
+    cumulative = [0.0]
+    for index in range(len(path_points) - 1):
+        cumulative.append(cumulative[-1] + (path_points[index + 1] - path_points[index]).length)
+
+    segment_entries = []
+    max_turn = 0.0
+
+    for index in range(len(path_points) - 1):
+        segment_start = cumulative[index]
+        segment_end = cumulative[index + 1]
+        overlap_start = max(start_distance, segment_start)
+        overlap_end = min(end_distance, segment_end)
+        if overlap_end - overlap_start <= MIN_BONE_LENGTH:
+            continue
+
+        turn = 0.0
+        for vertex_index in (index, index + 1):
+            if vertex_index <= 0 or vertex_index >= len(path_points) - 1:
+                continue
+            first = path_points[vertex_index] - path_points[vertex_index - 1]
+            second = path_points[vertex_index + 1] - path_points[vertex_index]
+            if first.length <= MIN_BONE_LENGTH or second.length <= MIN_BONE_LENGTH:
+                continue
+            turn = max(turn, first.angle(second, 0.0))
+
+        max_turn = max(max_turn, turn)
+        segment_entries.append((overlap_start, overlap_end, turn))
+
+    if not segment_entries:
+        return []
+
+    weighted_cumulative = [0.0]
+    for overlap_start, overlap_end, turn in segment_entries:
+        normalized_turn = turn / max_turn if max_turn > MIN_BONE_LENGTH else 0.0
+        weight = 1.0 + normalized_turn * bias * 4.0
+        weighted_cumulative.append(weighted_cumulative[-1] + (overlap_end - overlap_start) * weight)
+
+    weighted_total = weighted_cumulative[-1]
+    if weighted_total <= MIN_BONE_LENGTH:
+        return []
+
+    distances = []
+    for index in range(point_count):
+        target_weight = weighted_total * index / (point_count - 1)
+        for entry_index, entry in enumerate(segment_entries):
+            weight_start = weighted_cumulative[entry_index]
+            weight_end = weighted_cumulative[entry_index + 1]
+            if target_weight > weight_end and entry_index < len(segment_entries) - 1:
+                continue
+
+            overlap_start, overlap_end, _turn = entry
+            factor = 0.0 if weight_end - weight_start <= MIN_BONE_LENGTH else (target_weight - weight_start) / (weight_end - weight_start)
+            distances.append(overlap_start + (overlap_end - overlap_start) * max(0.0, min(1.0, factor)))
+            break
+
+    return distances
+
+
+def _segment_distribution_distances(path_points, source_distances, point_count, mode, curvature_bias):
+    if len(source_distances) < 2 or point_count < 2:
+        return []
+
+    start_distance = source_distances[0]
+    end_distance = source_distances[-1]
+    if end_distance - start_distance <= MIN_BONE_LENGTH:
+        return []
+
+    if mode == "FIT":
+        return list(source_distances)
+    if mode == "CURVE":
+        return _path_weighted_distances(path_points, start_distance, end_distance, point_count, curvature_bias)
+
+    return [
+        start_distance + (end_distance - start_distance) * index / (point_count - 1)
+        for index in range(point_count)
+    ]
+
+
+def _affected_bezier_indices(point_count, indices):
+    affected = set()
+    for index in indices:
+        affected.add(index)
+        if index > 0:
+            affected.add(index - 1)
+        if index < point_count - 1:
+            affected.add(index + 1)
+    return affected
+
+
+def _apply_segment_distribution(context, curve_obj, spline, indices, mode, curvature_bias):
+    if len(indices) < 2:
+        return 0
+
+    path_points = _evaluated_spline_path_points(context, curve_obj, spline)
+    if len(path_points) < 2 or not _has_valid_segment(path_points):
+        return 0
+
+    points = list(_spline_points(spline))
+    source_distances = _control_distances_on_path(curve_obj, spline, indices, path_points)
+    target_distances = _segment_distribution_distances(
+        path_points,
+        source_distances,
+        len(indices),
+        mode,
+        curvature_bias,
+    )
+    if len(target_distances) != len(indices):
+        return 0
+
+    radii = [_point_radius(points[index]) for index in indices]
+    tilts = [_point_tilt(points[index]) for index in indices]
+
+    for index, target_distance in zip(indices, target_distances):
+        point = points[index]
+        _move_point_to_world(curve_obj, spline, point, _point_at_distance(path_points, target_distance))
+        _set_point_radius(point, _sample_scalar_by_distance(source_distances, radii, target_distance))
+        _set_point_tilt(point, _sample_scalar_by_distance(source_distances, tilts, target_distance))
+
+    if spline.type == "BEZIER":
+        _reset_bezier_handles_for_indices(spline, _affected_bezier_indices(len(points), indices))
+
+    return len(indices)
+
+
+def _segment_distribution_runs(spline, selected_mode):
+    point_count = _control_point_count(spline)
+    if selected_mode:
+        return [run for run in _selected_index_runs(spline) if len(run) >= 2]
+    return [list(range(point_count))]
+
+
+def _set_point_selection(point, spline, selected):
+    if spline.type == "BEZIER":
+        point.select_control_point = selected
+        point.select_left_handle = selected
+        point.select_right_handle = selected
+        return
+
+    point.select = selected
+
+
+def _rebuild_spline_from_world_states(curve_obj, spline, states):
+    points = _spline_points(spline)
+    extra_count = len(states) - len(points)
+    if extra_count > 0:
+        points.add(extra_count)
+        points = _spline_points(spline)
+
+    for point, state in zip(points, states):
+        _move_point_to_world(curve_obj, spline, point, state["world"])
+        _set_point_radius(point, state["radius"])
+        _set_point_tilt(point, state["tilt"])
+        _set_point_selection(point, spline, state["selected"])
+        if hasattr(point, "weight_softbody"):
+            point.weight_softbody = state["weight_softbody"]
+
+    if spline.type == "BEZIER":
+        _reset_bezier_handles_to_path(spline)
+
+
+def _original_point_state(curve_obj, spline, point, selected=False):
+    return {
+        "world": _point_world_co(curve_obj, spline, point),
+        "radius": _point_radius(point),
+        "tilt": _point_tilt(point),
+        "selected": selected,
+        "weight_softbody": getattr(point, "weight_softbody", 0.0),
+    }
+
+
+def _sampled_point_state(path_points, source_distances, radii, tilts, distance, selected=True):
+    return {
+        "world": _point_at_distance(path_points, distance),
+        "radius": _sample_scalar_by_distance(source_distances, radii, distance),
+        "tilt": _sample_scalar_by_distance(source_distances, tilts, distance),
+        "selected": selected,
+        "weight_softbody": 0.0,
+    }
+
+
+def _subdivide_states_for_run(context, curve_obj, spline, run, cuts):
+    path_points = _evaluated_spline_path_points(context, curve_obj, spline)
+    if len(path_points) < 2 or not _has_valid_segment(path_points):
+        return []
+
+    points = list(_spline_points(spline))
+    source_distances = _control_distances_on_path(curve_obj, spline, run, path_points)
+    radii = [_point_radius(points[index]) for index in run]
+    tilts = [_point_tilt(points[index]) for index in run]
+    states = []
+
+    for offset in range(len(run) - 1):
+        start_distance = source_distances[offset]
+        end_distance = source_distances[offset + 1]
+        if end_distance - start_distance <= MIN_BONE_LENGTH:
+            return []
+
+        if offset == 0:
+            states.append(_sampled_point_state(path_points, source_distances, radii, tilts, start_distance))
+
+        for cut_index in range(1, cuts + 1):
+            factor = cut_index / (cuts + 1)
+            distance = start_distance + (end_distance - start_distance) * factor
+            states.append(_sampled_point_state(path_points, source_distances, radii, tilts, distance))
+
+        states.append(_sampled_point_state(path_points, source_distances, radii, tilts, end_distance))
+
+    return states
+
+
+def _subdivide_selected_spline(context, curve_obj, spline, cuts):
+    points = list(_spline_points(spline))
+    runs = [run for run in _selected_index_runs(spline) if len(run) >= 3]
+    if not runs:
+        return 0
+
+    replacements = {}
+    for run in runs:
+        states = _subdivide_states_for_run(context, curve_obj, spline, run, cuts)
+        if not states:
+            continue
+        replacements[run[0]] = (run[-1], states)
+
+    if not replacements:
+        return 0
+
+    rebuilt_states = []
+    index = 0
+    while index < len(points):
+        replacement = replacements.get(index)
+        if replacement is not None:
+            end_index, states = replacement
+            rebuilt_states.extend(states)
+            index = end_index + 1
+            continue
+
+        rebuilt_states.append(_original_point_state(curve_obj, spline, points[index], selected=False))
+        index += 1
+
+    added_count = len(rebuilt_states) - len(points)
+    if added_count <= 0:
+        return 0
+
+    _rebuild_spline_from_world_states(curve_obj, spline, rebuilt_states)
+    return added_count
 
 
 def _path_endpoint_data(context, curve_obj, spline):
@@ -1837,6 +2213,7 @@ class CTK_PG_resolution_collection_item(bpy.types.PropertyGroup):
 
 class CTK_PG_settings(bpy.types.PropertyGroup):
     show_curve_controls: BoolProperty(name="Curve Controls", default=True)
+    show_segment_control: BoolProperty(name="Segment Control", default=True)
     show_resolution_batch: BoolProperty(name="Resolution Batch", default=True)
     show_smooth_reset: BoolProperty(name="Smooth / Reset", default=True)
     show_locks: BoolProperty(name="Locks", default=True)
@@ -1867,6 +2244,23 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
         default=1,
         min=1,
         max=20,
+    )
+
+    curvature_bias: FloatProperty(
+        name="Curvature Bias",
+        description="How strongly curve distribution concentrates points in curved areas",
+        default=0.65,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
+
+    subdivide_cuts: IntProperty(
+        name="Subdivide Cuts",
+        description="Number of new points inserted between each selected segment",
+        default=1,
+        min=1,
+        max=16,
     )
 
     surface_object: PointerProperty(
@@ -2337,6 +2731,92 @@ class CTK_OT_snap_cursor(bpy.types.Operator):
 
         context.scene.cursor.location = target_world
         self.report({"INFO"}, f"Snapped 3D cursor to {self.mode.lower()}.")
+        return {"FINISHED"}
+
+
+class CTK_OT_segment_distribute(bpy.types.Operator):
+    bl_idname = "curve_toolkit.segment_distribute"
+    bl_label = "Distribute Segments"
+    bl_description = "Redistribute curve control points along the evaluated visual path"
+    bl_options = {"REGISTER", "UNDO"}
+
+    mode: bpy.props.EnumProperty(
+        name="Mode",
+        items=(
+            ("EVEN", "Evenly", "Space points evenly along the visual path"),
+            ("CURVE", "Curve", "Space points with extra density in curved areas"),
+            ("FIT", "Fit To Visual Path", "Move control points onto the evaluated visual path"),
+        ),
+        default="EVEN",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return _active_curve(context) is not None
+
+    def execute(self, context):
+        curve_obj, splines = _require_editable_open_curve(self, context)
+        if curve_obj is None:
+            return {"CANCELLED"}
+
+        settings = context.scene.curve_toolkit
+        selected_mode = _has_selected_points(splines)
+        changed_count = 0
+
+        for spline in splines:
+            for run in _segment_distribution_runs(spline, selected_mode):
+                changed_count += _apply_segment_distribution(
+                    context,
+                    curve_obj,
+                    spline,
+                    run,
+                    self.mode,
+                    settings.curvature_bias,
+                )
+
+        if changed_count == 0:
+            self.report({"ERROR"}, "No valid open spline segment could be distributed.")
+            return {"CANCELLED"}
+
+        context.view_layer.update()
+        label = "fit to visual path" if self.mode == "FIT" else self.mode.lower()
+        self.report({"INFO"}, f"Updated {changed_count} curve points with {label}.")
+        return {"FINISHED"}
+
+
+class CTK_OT_segment_subdivide_selected(bpy.types.Operator):
+    bl_idname = "curve_toolkit.segment_subdivide_selected"
+    bl_label = "Subdivide Selected"
+    bl_description = "Insert new points inside selected curve segments using the evaluated visual path"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_curve(context) is not None
+
+    def execute(self, context):
+        curve_obj, splines = _require_editable_open_curve(self, context)
+        if curve_obj is None:
+            return {"CANCELLED"}
+
+        settings = context.scene.curve_toolkit
+        added_count = 0
+        has_selected_points = False
+
+        for spline in splines:
+            if _selected_index_runs(spline):
+                has_selected_points = True
+            added_count += _subdivide_selected_spline(context, curve_obj, spline, settings.subdivide_cuts)
+
+        if added_count == 0:
+            if not has_selected_points:
+                self.report({"ERROR"}, "Select at least 3 contiguous curve points to subdivide.")
+            else:
+                self.report({"ERROR"}, "Selected ranges must contain at least 3 contiguous points.")
+            return {"CANCELLED"}
+
+        context.view_layer.update()
+        self.report({"INFO"}, f"Added {added_count} curve points.")
         return {"FINISHED"}
 
 
@@ -3648,6 +4128,22 @@ class CTK_PT_tools(bpy.types.Panel):
             op = row.operator(CTK_OT_snap_cursor.bl_idname, text="Center")
             op.mode = "CENTER"
 
+        segment_box = layout.box()
+        if self._draw_foldout(segment_box, settings, "show_segment_control", "Segment Control", "IPO_EASE_IN_OUT"):
+            segment_box.prop(settings, "curvature_bias", slider=True)
+            segment_box.prop(settings, "subdivide_cuts")
+
+            segment_column = segment_box.column(align=True)
+            segment_column.enabled = curve_obj is not None
+            row = segment_column.row(align=True)
+            op = row.operator(CTK_OT_segment_distribute.bl_idname, text="Distribute Evenly")
+            op.mode = "EVEN"
+            op = row.operator(CTK_OT_segment_distribute.bl_idname, text="Distribute Curve")
+            op.mode = "CURVE"
+            op = segment_column.operator(CTK_OT_segment_distribute.bl_idname, text="Fit To Visual Path")
+            op.mode = "FIT"
+            segment_column.operator(CTK_OT_segment_subdivide_selected.bl_idname)
+
         surface_box = layout.box()
         if self._draw_foldout(surface_box, settings, "show_surface_tools", "Surface Tools", "MOD_SHRINKWRAP"):
             row = surface_box.row(align=True)
@@ -3896,6 +4392,8 @@ classes = (
     CTK_OT_switch_direction,
     CTK_OT_set_origin,
     CTK_OT_snap_cursor,
+    CTK_OT_segment_distribute,
+    CTK_OT_segment_subdivide_selected,
     CTK_OT_smooth_scale,
     CTK_OT_smooth_curve,
     CTK_OT_smooth_twist,
