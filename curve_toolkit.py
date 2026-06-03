@@ -752,6 +752,128 @@ def _component_paths_from_mesh(mesh, matrix_world):
     return sorted(paths, key=lambda path: len(path), reverse=True)
 
 
+def _mesh_axis_path_points(mesh, matrix_world):
+    if not mesh.vertices:
+        return []
+
+    edges = list(mesh.edges)
+    if not edges:
+        return [[matrix_world @ vertex.co for vertex in mesh.vertices]]
+
+    adjacency = {index: set() for index in range(len(mesh.vertices))}
+    for edge in edges:
+        first, second = edge.vertices
+        adjacency[first].add(second)
+        adjacency[second].add(first)
+
+    visited_vertices = set()
+    paths = []
+    for start_index in range(len(mesh.vertices)):
+        if start_index in visited_vertices:
+            continue
+
+        stack = [start_index]
+        component = set()
+        while stack:
+            vertex_index = stack.pop()
+            if vertex_index in component:
+                continue
+            component.add(vertex_index)
+            stack.extend(adjacency[vertex_index])
+
+        visited_vertices.update(component)
+        component_edges = [edge for edge in edges if edge.vertices[0] in component and edge.vertices[1] in component]
+        if len(component) < 2 or not component_edges:
+            continue
+
+        if max(len(adjacency[index]) for index in component) <= 2:
+            endpoints = [index for index in component if len(adjacency[index]) <= 1]
+            current = min(endpoints or component)
+            previous = None
+            ordered_indices = [current]
+            visited_edges = set()
+
+            while True:
+                next_index = None
+                for neighbor in sorted(adjacency[current]):
+                    edge_key = tuple(sorted((current, neighbor)))
+                    if neighbor == previous or edge_key in visited_edges:
+                        continue
+                    next_index = neighbor
+                    visited_edges.add(edge_key)
+                    break
+
+                if next_index is None:
+                    break
+
+                previous = current
+                current = next_index
+                ordered_indices.append(current)
+
+                if current == ordered_indices[0]:
+                    break
+
+            paths.append([matrix_world @ mesh.vertices[index].co for index in ordered_indices])
+            continue
+
+        degree_groups = {}
+        for vertex_index in component:
+            degree_groups.setdefault(len(adjacency[vertex_index]), []).append(vertex_index)
+        edge_count = max(len(component_edges), 1)
+        likely_ring_size = max(degree_groups.items(), key=lambda item: (len(item[1]), item[0]))[0]
+        ring_count = max(2, round(len(component) / max(1, likely_ring_size)))
+
+        candidates = []
+        for group_count in range(max(2, ring_count - 2), ring_count + 3):
+            if group_count > len(component):
+                continue
+
+            axis = max(0, min(2, max(range(3), key=lambda axis_index: max(
+                (mesh.vertices[index].co[axis_index] for index in component),
+                default=0.0,
+            ) - min(
+                (mesh.vertices[index].co[axis_index] for index in component),
+                default=0.0,
+            ))))
+            ordered = sorted(component, key=lambda index: mesh.vertices[index].co[axis])
+            groups = [[] for _ in range(group_count)]
+            for order_index, vertex_index in enumerate(ordered):
+                bucket = min(group_count - 1, int(order_index * group_count / len(ordered)))
+                groups[bucket].append(vertex_index)
+            if any(not group for group in groups):
+                continue
+
+            grouped_edges = 0
+            cross_edges = 0
+            vertex_to_group = {}
+            centers = []
+            for group_index, group in enumerate(groups):
+                center = Vector((0.0, 0.0, 0.0))
+                for vertex_index in group:
+                    vertex_to_group[vertex_index] = group_index
+                    center += mesh.vertices[vertex_index].co
+                centers.append(center / len(group))
+
+            for edge in component_edges:
+                first_group = vertex_to_group[edge.vertices[0]]
+                second_group = vertex_to_group[edge.vertices[1]]
+                if first_group == second_group:
+                    grouped_edges += 1
+                elif abs(first_group - second_group) == 1:
+                    cross_edges += 1
+
+            score = grouped_edges * 2 + cross_edges - abs(group_count - ring_count) * 0.25
+            candidates.append((score, centers))
+
+        if not candidates:
+            continue
+
+        centers = max(candidates, key=lambda item: item[0])[1]
+        paths.append([matrix_world @ center for center in centers])
+
+    return sorted(paths, key=lambda path: len(path), reverse=True)
+
+
 def _evaluated_spline_path_points(context, curve_obj, spline):
     temp_curve = bpy.data.curves.new(f"{curve_obj.name}_path_eval", "CURVE")
     temp_obj = None
@@ -770,7 +892,9 @@ def _evaluated_spline_path_points(context, curve_obj, spline):
         eval_obj = temp_obj.evaluated_get(depsgraph)
         mesh = eval_obj.to_mesh()
         try:
-            paths = _component_paths_from_mesh(mesh, temp_obj.matrix_world)
+            paths = _mesh_axis_path_points(mesh, temp_obj.matrix_world)
+            if not paths:
+                paths = _component_paths_from_mesh(mesh, temp_obj.matrix_world)
         finally:
             eval_obj.to_mesh_clear()
 
@@ -940,6 +1064,30 @@ def _control_distances_on_path(curve_obj, spline, indices, path_points):
     ]
 
 
+def _ordered_control_distances_on_path(curve_obj, spline, indices, path_points):
+    total_path_length = _polyline_length(path_points)
+    point_count = _control_point_count(spline)
+    points = list(_spline_points(spline))
+    if total_path_length <= MIN_BONE_LENGTH or point_count < 2:
+        return []
+
+    control_distances = [0.0]
+    for index in range(point_count - 1):
+        start = _point_world_co(curve_obj, spline, points[index])
+        end = _point_world_co(curve_obj, spline, points[index + 1])
+        control_distances.append(control_distances[-1] + (end - start).length)
+
+    total_control_length = control_distances[-1]
+    if total_control_length <= MIN_BONE_LENGTH:
+        return [_fallback_node_distance(total_path_length, point_count, index) for index in indices]
+
+    distances = [
+        control_distances[index] / total_control_length * total_path_length
+        for index in indices
+    ]
+    return _monotonic_distances(distances, total_path_length)
+
+
 def _sample_scalar_by_distance(source_distances, values, target_distance):
     if not source_distances or not values:
         return 0.0
@@ -1058,23 +1206,18 @@ def _segment_distribution_distances(path_points, source_distances, point_count, 
     ]
 
 
-def _path_sequential_distances(path_points):
-    distances = [0.0]
-    for index in range(len(path_points) - 1):
-        distances.append(distances[-1] + (path_points[index + 1] - path_points[index]).length)
-    return distances
-
-
 def _distribution_path_for_indices(context, curve_obj, spline, indices, mode, path_points=None):
-    if mode == "FIT":
-        if path_points is None:
-            path_points = _evaluated_spline_path_points(context, curve_obj, spline)
-        source_distances = _control_distances_on_path(curve_obj, spline, indices, path_points)
-        return path_points, source_distances
+    if path_points is None:
+        path_points = _evaluated_spline_path_points(context, curve_obj, spline)
+    if len(path_points) < 2 or not _has_valid_segment(path_points):
+        points = list(_spline_points(spline))
+        path_points = [_point_world_co(curve_obj, spline, points[index]) for index in indices]
 
-    points = list(_spline_points(spline))
-    control_path = [_point_world_co(curve_obj, spline, points[index]) for index in indices]
-    return control_path, _path_sequential_distances(control_path)
+    if mode == "FIT":
+        source_distances = _control_distances_on_path(curve_obj, spline, indices, path_points)
+    else:
+        source_distances = _ordered_control_distances_on_path(curve_obj, spline, indices, path_points)
+    return path_points, source_distances
 
 
 def _affected_bezier_indices(point_count, indices):
