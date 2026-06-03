@@ -1087,66 +1087,29 @@ def _lerp_value(first, second, factor):
     return first + (second - first) * factor
 
 
-def _arc_endpoint_before(first, second):
-    return first + (first - second)
+def _subdivide_target_distances(source_distances, point_count):
+    if len(source_distances) < 2 or point_count < 2:
+        return []
+
+    start_distance = source_distances[0]
+    end_distance = source_distances[-1]
+    if end_distance - start_distance <= MIN_BONE_LENGTH:
+        return []
+
+    return [
+        start_distance + (end_distance - start_distance) * index / (point_count - 1)
+        for index in range(point_count)
+    ]
 
 
-def _arc_endpoint_after(first, second):
-    return second + (second - first)
-
-
-def _catmull_rom_uniform(p0, p1, p2, p3, factor):
-    t2 = factor * factor
-    t3 = t2 * factor
-    return (
-        (p1 * 2.0)
-        + (p2 - p0) * factor
-        + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * t2
-        + (-p0 + p1 * 3.0 - p2 * 3.0 + p3) * t3
-    ) * 0.5
-
-
-def _catmull_rom_centripetal(p0, p1, p2, p3, factor):
-    def next_t(previous, first, second):
-        distance = max((second - first).length, MIN_BONE_LENGTH)
-        return previous + distance ** 0.5
-
-    t0 = 0.0
-    t1 = next_t(t0, p0, p1)
-    t2 = next_t(t1, p1, p2)
-    t3 = next_t(t2, p2, p3)
-    t = t1 + (t2 - t1) * factor
-
-    if min(t1 - t0, t2 - t1, t3 - t2) <= MIN_BONE_LENGTH:
-        return _catmull_rom_uniform(p0, p1, p2, p3, factor)
-
-    a1 = p0 * ((t1 - t) / (t1 - t0)) + p1 * ((t - t0) / (t1 - t0))
-    a2 = p1 * ((t2 - t) / (t2 - t1)) + p2 * ((t - t1) / (t2 - t1))
-    a3 = p2 * ((t3 - t) / (t3 - t2)) + p3 * ((t - t2) / (t3 - t2))
-    b1 = a1 * ((t2 - t) / (t2 - t0)) + a2 * ((t - t0) / (t2 - t0))
-    b2 = a2 * ((t3 - t) / (t3 - t1)) + a3 * ((t - t1) / (t3 - t1))
-    return b1 * ((t2 - t) / (t2 - t1)) + b2 * ((t - t1) / (t2 - t1))
-
-
-def _arc_subdivide_position(positions, segment_index, factor):
-    p1 = positions[segment_index]
-    p2 = positions[segment_index + 1]
-    p0 = positions[segment_index - 1] if segment_index > 0 else _arc_endpoint_before(p1, p2)
-    p3 = positions[segment_index + 2] if segment_index + 2 < len(positions) else _arc_endpoint_after(p1, p2)
-    return _catmull_rom_centripetal(p0, p1, p2, p3, factor)
-
-
-def _interpolated_arc_state(spline, first_point, second_point, co, factor):
+def _sampled_visual_subdivide_state(curve_obj, spline, path_points, source_distances, radii, tilts, weights, softbody_weights, distance):
+    co = curve_obj.matrix_world.inverted() @ _point_at_distance(path_points, distance)
     state = {
         "co": co.copy(),
-        "radius": _lerp_value(_point_radius(first_point), _point_radius(second_point), factor),
-        "tilt": _lerp_value(_point_tilt(first_point), _point_tilt(second_point), factor),
+        "radius": _sample_scalar_by_distance(source_distances, radii, distance),
+        "tilt": _sample_scalar_by_distance(source_distances, tilts, distance),
         "selected": True,
-        "weight_softbody": _lerp_value(
-            getattr(first_point, "weight_softbody", 0.0),
-            getattr(second_point, "weight_softbody", 0.0),
-            factor,
-        ),
+        "weight_softbody": _sample_scalar_by_distance(source_distances, softbody_weights, distance),
         "reset_left": True,
         "reset_right": True,
     }
@@ -1161,48 +1124,59 @@ def _interpolated_arc_state(spline, first_point, second_point, co, factor):
             }
         )
     else:
-        state["weight"] = _lerp_value(float(first_point.co[3]), float(second_point.co[3]), factor)
+        state["weight"] = _sample_scalar_by_distance(source_distances, weights, distance)
 
     return state
 
 
-def _arc_subdivide_states_for_run(spline, points, run, cuts):
-    positions = [_point_local_co(points[index], spline) for index in run]
+def _visual_subdivide_states_for_run(curve_obj, spline, points, run, cuts, path_points):
+    if len(path_points) < 2 or not _has_valid_segment(path_points):
+        return []
+
+    source_distances = _control_distances_on_path(curve_obj, spline, run, path_points)
+    target_count = len(run) + (len(run) - 1) * cuts
+    target_distances = _subdivide_target_distances(source_distances, target_count)
+    if len(target_distances) != target_count:
+        return []
+
+    run_points = [points[index] for index in run]
+    radii = [_point_radius(point) for point in run_points]
+    tilts = [_point_tilt(point) for point in run_points]
+    softbody_weights = [getattr(point, "weight_softbody", 0.0) for point in run_points]
+    weights = [float(point.co[3]) for point in run_points] if spline.type != "BEZIER" else []
     states = []
 
-    for offset in range(len(run) - 1):
-        first_point = points[run[offset]]
-        second_point = points[run[offset + 1]]
-
-        if offset == 0:
-            states.append(_spline_point_state(spline, first_point, selected=True, reset_right=True))
-
-        for cut_index in range(1, cuts + 1):
-            factor = cut_index / (cuts + 1)
+    for index, target_distance in enumerate(target_distances):
+        if index == 0:
+            states.append(_spline_point_state(spline, run_points[0], selected=True, reset_right=True))
+        elif index == len(target_distances) - 1:
             states.append(
-                _interpolated_arc_state(
+                _spline_point_state(
                     spline,
-                    first_point,
-                    second_point,
-                    _arc_subdivide_position(positions, offset, factor),
-                    factor,
+                    run_points[-1],
+                    selected=True,
+                    reset_left=True,
                 )
             )
-
-        states.append(
-            _spline_point_state(
-                spline,
-                second_point,
-                selected=True,
-                reset_left=True,
-                reset_right=offset < len(run) - 2,
+        else:
+            states.append(
+                _sampled_visual_subdivide_state(
+                    curve_obj,
+                    spline,
+                    path_points,
+                    source_distances,
+                    radii,
+                    tilts,
+                    weights,
+                    softbody_weights,
+                    target_distance,
+                )
             )
-        )
 
     return states
 
 
-def _reset_bezier_handles_from_arc_states(spline, states):
+def _reset_bezier_handles_from_subdivide_states(spline, states):
     points = list(spline.bezier_points)
     for index, (point, state) in enumerate(zip(points, states)):
         if state["reset_left"]:
@@ -1220,7 +1194,7 @@ def _reset_bezier_handles_from_arc_states(spline, states):
                 point.handle_right = point.co + (points[index + 1].co - point.co) / 3.0
 
 
-def _rebuild_bezier_spline_from_arc_states(spline, states):
+def _rebuild_bezier_spline_from_subdivide_states(spline, states):
     points = spline.bezier_points
     extra_count = len(states) - len(points)
     if extra_count > 0:
@@ -1239,10 +1213,10 @@ def _rebuild_bezier_spline_from_arc_states(spline, states):
         if hasattr(point, "weight_softbody"):
             point.weight_softbody = state["weight_softbody"]
 
-    _reset_bezier_handles_from_arc_states(spline, states)
+    _reset_bezier_handles_from_subdivide_states(spline, states)
 
 
-def _rebuild_points_spline_from_arc_states(spline, states):
+def _rebuild_points_spline_from_subdivide_states(spline, states):
     points = spline.points
     extra_count = len(states) - len(points)
     if extra_count > 0:
@@ -1259,15 +1233,16 @@ def _rebuild_points_spline_from_arc_states(spline, states):
             point.weight_softbody = state["weight_softbody"]
 
 
-def _subdivide_selected_spline(_context, _curve_obj, spline, cuts):
+def _subdivide_selected_spline(context, curve_obj, spline, cuts):
     points = list(_spline_points(spline))
     runs = [run for run in _selected_index_runs(spline) if len(run) >= 3]
     if not runs:
         return 0
 
+    path_points = _evaluated_spline_path_points(context, curve_obj, spline)
     replacements = {}
     for run in runs:
-        states = _arc_subdivide_states_for_run(spline, points, run, cuts)
+        states = _visual_subdivide_states_for_run(curve_obj, spline, points, run, cuts, path_points)
         if states:
             replacements[run[0]] = (run[-1], states)
 
@@ -1292,9 +1267,9 @@ def _subdivide_selected_spline(_context, _curve_obj, spline, cuts):
         return 0
 
     if spline.type == "BEZIER":
-        _rebuild_bezier_spline_from_arc_states(spline, rebuilt_states)
+        _rebuild_bezier_spline_from_subdivide_states(spline, rebuilt_states)
     else:
-        _rebuild_points_spline_from_arc_states(spline, rebuilt_states)
+        _rebuild_points_spline_from_subdivide_states(spline, rebuilt_states)
 
     return added_count
 
@@ -2926,7 +2901,7 @@ class CTK_OT_segment_distribute(bpy.types.Operator):
 class CTK_OT_segment_subdivide_selected(bpy.types.Operator):
     bl_idname = "curve_toolkit.segment_subdivide_selected"
     bl_label = "Subdivide Selected"
-    bl_description = "Insert arc points between selected reference points without moving the references"
+    bl_description = "Insert points from the current visual path while preserving selected range endpoints"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
