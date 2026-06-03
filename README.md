@@ -41,9 +41,9 @@ Distribution:
 Subdivide:
 
 - `Subdivide Cuts`: controls how many new points are inserted between each selected segment.
-- `Subdivide Selected`: inserts points inside selected segments using samples from the evaluated visual path.
+- `Subdivide Selected`: inserts arc points between selected reference points without moving those reference points.
 
-Distribution and fit tools use selected contiguous point ranges when points are selected. If no points are selected, they process the whole open spline. `Subdivide Selected` requires at least 2 contiguous selected points. Bezier subdivision splits handles directly to preserve the drawn curve. NURBS and Path subdivision inserts points in control-point order to avoid looped paths. Segment Control keeps object transforms, bevel references, caps, materials, radius profile, and twist profile stable.
+Distribution and fit tools use selected contiguous point ranges when points are selected. If no points are selected, they process the whole open spline. `Subdivide Selected` requires at least 3 contiguous selected points so the inserted cuts can form an arc from the selected reference shape. Segment Control keeps object transforms, bevel references, caps, materials, radius profile, and twist profile stable.
 
 ## Surface Tools
 
