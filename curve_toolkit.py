@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Curve Toolkit",
     "author": "madan6557",
-    "version": (1, 6, 8),
+    "version": (1, 7, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Curve Toolkit",
     "description": "Curve modeling tools and bone chain generation.",
@@ -16,13 +16,15 @@ from math import pi
 
 import bpy
 from bpy.app.handlers import persistent
-from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty
+from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
+from mathutils.bvhtree import BVHTree
 from mathutils import Quaternion, Vector
 
 
 MIN_BONE_LENGTH = 1.0e-6
 CTK_ENDPOINT_LOCKS_KEY = "ctk_endpoint_locks"
 CTK_TWIST_LOCKS_KEY = "ctk_twist_locks"
+CTK_LENGTHS_KEY = "ctk_stored_lengths"
 LEGACY_ENDPOINT_LOCKS_KEY = "hmt_endpoint_locks"
 _CURVE_LOCK_HANDLER_RUNNING = False
 _RESOLUTION_BATCH_UPDATE_RUNNING = False
@@ -85,6 +87,45 @@ def _active_armature(context):
     if obj.type != "ARMATURE":
         return None
     return obj
+
+
+def _active_or_selected_armature(context):
+    active = _active_armature(context)
+    if active is not None:
+        return active
+
+    for obj in context.selected_objects:
+        if obj.type == "ARMATURE":
+            return obj
+
+    return None
+
+
+def _selected_curve_objects(context):
+    return [obj for obj in context.selected_objects if obj.type == "CURVE"]
+
+
+def _target_curve_objects(context):
+    curves = _selected_curve_objects(context)
+    active = _active_curve(context)
+    if active is not None and active not in curves:
+        curves.insert(0, active)
+    return curves
+
+
+def _target_or_scene_curve_objects(context):
+    curves = _target_curve_objects(context)
+    if curves:
+        return curves
+    return [obj for obj in context.scene.objects if obj.type == "CURVE"]
+
+
+def _poll_mesh_object(_self, obj):
+    return obj is not None and obj.type == "MESH"
+
+
+def _poll_curve_object(_self, obj):
+    return obj is not None and obj.type == "CURVE"
 
 
 def _spline_points(spline):
@@ -217,6 +258,259 @@ def _selected_index_runs(spline):
 
 def _has_selected_points(splines):
     return any(_selected_index_runs(spline) for spline in splines)
+
+
+def _spline_world_positions(curve_obj, spline):
+    return [_point_world_co(curve_obj, spline, point) for point in _spline_points(spline)]
+
+
+def _set_spline_world_positions(curve_obj, spline, positions, reset_handles=False):
+    for point, position in zip(_spline_points(spline), positions):
+        _move_point_to_world(curve_obj, spline, point, position)
+
+    if reset_handles and spline.type == "BEZIER":
+        _reset_bezier_handles_to_path(spline)
+
+
+def _translate_spline_world(curve_obj, spline, delta):
+    for point in _spline_points(spline):
+        _move_point_to_world(curve_obj, spline, point, _point_world_co(curve_obj, spline, point) + delta)
+
+
+def _resample_world_path_by_point_count(path_points, point_count):
+    total_length = _polyline_length(path_points)
+    if total_length <= MIN_BONE_LENGTH or point_count < 2:
+        return []
+
+    return [
+        _point_at_distance(path_points, total_length * index / (point_count - 1))
+        for index in range(point_count)
+    ]
+
+
+def _resample_world_path_segment_by_point_count(path_points, start_distance, end_distance, point_count):
+    total_length = _polyline_length(path_points)
+    if total_length <= MIN_BONE_LENGTH or point_count < 2:
+        return []
+
+    start_distance = max(0.0, min(total_length, start_distance))
+    end_distance = max(0.0, min(total_length, end_distance))
+    if end_distance - start_distance <= MIN_BONE_LENGTH:
+        return []
+
+    return [
+        _point_at_distance(path_points, start_distance + (end_distance - start_distance) * index / (point_count - 1))
+        for index in range(point_count)
+    ]
+
+
+def _set_spline_length(curve_obj, spline, target_length):
+    positions = _spline_world_positions(curve_obj, spline)
+    current_length = _polyline_length(positions)
+    if current_length <= MIN_BONE_LENGTH or target_length <= MIN_BONE_LENGTH:
+        return False
+
+    root = positions[0]
+    scale = target_length / current_length
+    new_positions = [root + (position - root) * scale for position in positions]
+    _set_spline_world_positions(curve_obj, spline, new_positions, reset_handles=True)
+    return True
+
+
+def _trim_spline(curve_obj, spline, root_amount, tip_amount):
+    positions = _spline_world_positions(curve_obj, spline)
+    point_count = len(positions)
+    total_length = _polyline_length(positions)
+    if total_length <= MIN_BONE_LENGTH or point_count < 2:
+        return False
+
+    start_distance = max(0.0, root_amount)
+    end_distance = total_length - max(0.0, tip_amount)
+    new_positions = _resample_world_path_segment_by_point_count(positions, start_distance, end_distance, point_count)
+    if not new_positions:
+        return False
+
+    _set_spline_world_positions(curve_obj, spline, new_positions, reset_handles=True)
+    return True
+
+
+def _stored_lengths(curve_obj):
+    raw_data = curve_obj.get(CTK_LENGTHS_KEY, "[]")
+    try:
+        data = json.loads(raw_data)
+    except (TypeError, ValueError):
+        data = []
+    return data if isinstance(data, list) else []
+
+
+def _store_lengths(curve_obj):
+    lengths = [_polyline_length(_spline_world_positions(curve_obj, spline)) for spline in _editable_splines(curve_obj)]
+    curve_obj[CTK_LENGTHS_KEY] = json.dumps(lengths)
+    return len(lengths)
+
+
+def _surface_bvh_from_object(context, surface_obj):
+    depsgraph = context.evaluated_depsgraph_get()
+    eval_obj = surface_obj.evaluated_get(depsgraph)
+    mesh = eval_obj.to_mesh()
+    try:
+        vertices = [vertex.co.copy() for vertex in mesh.vertices]
+        polygons = [list(polygon.vertices) for polygon in mesh.polygons]
+        bvh = BVHTree.FromPolygons(vertices, polygons)
+    finally:
+        eval_obj.to_mesh_clear()
+
+    normal_matrix = surface_obj.matrix_world.to_3x3().inverted().transposed()
+    return bvh, surface_obj.matrix_world.copy(), surface_obj.matrix_world.inverted(), normal_matrix
+
+
+def _nearest_surface_point(surface_data, world_position):
+    bvh, matrix_world, matrix_world_inverted, normal_matrix = surface_data
+    local_position = matrix_world_inverted @ world_position
+    result = bvh.find_nearest(local_position)
+    if result is None:
+        return None
+
+    local_location, local_normal, _face_index, _distance = result
+    world_location = matrix_world @ local_location
+    world_normal = normal_matrix @ local_normal
+    if world_normal.length <= MIN_BONE_LENGTH:
+        world_normal = Vector((0.0, 0.0, 1.0))
+    else:
+        world_normal.normalize()
+
+    return world_location, world_normal
+
+
+def _surface_target_world(surface_data, world_position, offset):
+    nearest = _nearest_surface_point(surface_data, world_position)
+    if nearest is None:
+        return None
+    location, normal = nearest
+    return location + normal * offset
+
+
+def _move_spline_root_to_surface(curve_obj, spline, surface_data, offset):
+    points = _spline_points(spline)
+    target = _surface_target_world(surface_data, _point_world_co(curve_obj, spline, points[0]), offset)
+    if target is None:
+        return False
+
+    _move_point_to_world(curve_obj, spline, points[0], target)
+    return True
+
+
+def _offset_spline_root_to_surface(curve_obj, spline, surface_data, offset):
+    points = _spline_points(spline)
+    root_world = _point_world_co(curve_obj, spline, points[0])
+    target = _surface_target_world(surface_data, root_world, offset)
+    if target is None:
+        return False
+
+    _translate_spline_world(curve_obj, spline, target - root_world)
+    return True
+
+
+def _snap_spline_to_surface(curve_obj, spline, surface_data, offset):
+    changed = False
+    for point in _spline_points(spline):
+        world_position = _point_world_co(curve_obj, spline, point)
+        target = _surface_target_world(surface_data, world_position, offset)
+        if target is None:
+            continue
+        _move_point_to_world(curve_obj, spline, point, target)
+        changed = True
+    return changed
+
+
+def _push_spline_from_surface(curve_obj, spline, surface_data, offset):
+    changed = False
+    for point in _spline_points(spline):
+        world_position = _point_world_co(curve_obj, spline, point)
+        nearest = _nearest_surface_point(surface_data, world_position)
+        if nearest is None:
+            continue
+
+        location, normal = nearest
+        distance = (world_position - location).dot(normal)
+        if distance >= offset:
+            continue
+
+        _move_point_to_world(curve_obj, spline, point, location + normal * offset)
+        changed = True
+
+    return changed
+
+
+def _profile_radius_value(preset, factor, root_radius, tip_radius, mid_radius):
+    factor = max(0.0, min(1.0, factor))
+
+    if preset == "FLAT":
+        return root_radius
+    if preset == "ROOT_THICK":
+        return root_radius + (tip_radius - root_radius) * factor
+    if preset == "TIP_THIN":
+        return root_radius * (1.0 - factor) + tip_radius * factor
+    if preset == "BOTH_THIN":
+        middle = 1.0 - abs(2.0 * factor - 1.0)
+        edge = tip_radius
+        return edge + (mid_radius - edge) * middle
+    if preset == "ANIME_SPIKE":
+        if factor < 0.35:
+            local_factor = factor / 0.35
+            return root_radius + (mid_radius - root_radius) * local_factor
+        local_factor = (factor - 0.35) / 0.65
+        return mid_radius + (tip_radius - mid_radius) * local_factor
+
+    return root_radius
+
+
+def _apply_radius_profile_to_indices(points, indices, preset, root_radius, tip_radius, mid_radius):
+    if len(indices) == 1:
+        _set_point_radius(points[indices[0]], root_radius)
+        return 1
+
+    for offset, index in enumerate(indices):
+        factor = offset / (len(indices) - 1)
+        _set_point_radius(points[index], _profile_radius_value(preset, factor, root_radius, tip_radius, mid_radius))
+    return len(indices)
+
+
+def _apply_radius_profile_to_spline(spline, preset, root_radius, tip_radius, mid_radius, selected_mode):
+    points = list(_spline_points(spline))
+    changed = 0
+
+    if selected_mode:
+        for run in _selected_index_runs(spline):
+            changed += _apply_radius_profile_to_indices(points, run, preset, root_radius, tip_radius, mid_radius)
+        return changed
+
+    return _apply_radius_profile_to_indices(points, list(range(len(points))), preset, root_radius, tip_radius, mid_radius)
+
+
+def _sample_values(values, count):
+    if not values or count < 1:
+        return []
+    if len(values) == 1:
+        return [values[0]] * count
+    if count == 1:
+        return [values[0]]
+
+    sampled = []
+    for index in range(count):
+        position = (len(values) - 1) * index / (count - 1)
+        left_index = int(position)
+        right_index = min(len(values) - 1, left_index + 1)
+        factor = position - left_index
+        sampled.append(values[left_index] + (values[right_index] - values[left_index]) * factor)
+    return sampled
+
+
+def _apply_sampled_radius_values(points, indices, values):
+    sampled = _sample_values(values, len(indices))
+    for index, value in zip(indices, sampled):
+        _set_point_radius(points[index], value)
+    return len(sampled)
 
 
 def _reset_bezier_handles_for_indices(spline, indices):
@@ -1546,8 +1840,16 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
     show_resolution_batch: BoolProperty(name="Resolution Batch", default=True)
     show_smooth_reset: BoolProperty(name="Smooth / Reset", default=True)
     show_locks: BoolProperty(name="Locks", default=True)
+    show_surface_tools: BoolProperty(name="Surface Tools", default=True)
+    show_length_tools: BoolProperty(name="Length Tools", default=True)
+    show_profile_tools: BoolProperty(name="Profile / Taper", default=True)
+    show_bevel_manager: BoolProperty(name="Bevel Manager", default=True)
+    show_validation_tools: BoolProperty(name="Validation", default=True)
+    show_lod_tools: BoolProperty(name="LOD Tools", default=True)
+    show_selection_tools: BoolProperty(name="Selection Tools", default=True)
     show_mirror: BoolProperty(name="Mirror", default=True)
     show_caps: BoolProperty(name="Caps", default=True)
+    show_convert_tools: BoolProperty(name="Convert / Bridge", default=True)
     show_rigging: BoolProperty(name="Rigging", default=True)
 
     smooth_factor: FloatProperty(
@@ -1565,6 +1867,118 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
         default=1,
         min=1,
         max=20,
+    )
+
+    surface_object: PointerProperty(
+        name="Surface",
+        description="Mesh surface used by snap and collision tools",
+        type=bpy.types.Object,
+        poll=_poll_mesh_object,
+    )
+
+    surface_offset: FloatProperty(
+        name="Offset",
+        description="Distance to keep curve points away from the surface",
+        default=0.0,
+        precision=4,
+        subtype="DISTANCE",
+    )
+
+    length_value: FloatProperty(
+        name="Length",
+        description="Target length for Set Length and Match Length operations",
+        default=1.0,
+        min=0.0,
+        precision=4,
+        subtype="DISTANCE",
+    )
+
+    trim_amount: FloatProperty(
+        name="Trim",
+        description="Distance removed from root or tip by trim tools",
+        default=0.05,
+        min=0.0,
+        precision=4,
+        subtype="DISTANCE",
+    )
+
+    profile_preset: EnumProperty(
+        name="Preset",
+        description="Radius profile preset",
+        items=(
+            ("FLAT", "Flat", "Use one radius along the curve"),
+            ("ROOT_THICK", "Root Thick", "Taper from root radius to tip radius"),
+            ("TIP_THIN", "Tip Thin", "Alias taper profile for a thin tip"),
+            ("BOTH_THIN", "Both Thin", "Thin root and tip with a thicker middle"),
+            ("ANIME_SPIKE", "Anime Spike", "Build a sharp stylized strand profile"),
+        ),
+        default="ROOT_THICK",
+    )
+
+    profile_root_radius: FloatProperty(
+        name="Root",
+        description="Root radius used by profile presets",
+        default=1.0,
+        min=0.0,
+        precision=4,
+    )
+
+    profile_mid_radius: FloatProperty(
+        name="Middle",
+        description="Middle radius used by profile presets",
+        default=0.6,
+        min=0.0,
+        precision=4,
+    )
+
+    profile_tip_radius: FloatProperty(
+        name="Tip",
+        description="Tip radius used by profile presets",
+        default=0.05,
+        min=0.0,
+        precision=4,
+    )
+
+    profile_clipboard: StringProperty(
+        name="Profile Clipboard",
+        description="Internal radius profile clipboard",
+        default="",
+        options={"HIDDEN"},
+    )
+
+    bevel_object: PointerProperty(
+        name="Bevel Object",
+        description="Curve object assigned as bevel object",
+        type=bpy.types.Object,
+        poll=_poll_curve_object,
+    )
+
+    validation_report: StringProperty(
+        name="Report",
+        description="Last validation report",
+        default="No validation report.",
+    )
+
+    validation_problem_objects: StringProperty(
+        name="Problem Objects",
+        description="Internal validation object selection cache",
+        default="[]",
+        options={"HIDDEN"},
+    )
+
+    selection_length_threshold: FloatProperty(
+        name="Length",
+        description="Length threshold for object selection tools",
+        default=0.25,
+        min=0.0,
+        precision=4,
+        subtype="DISTANCE",
+    )
+
+    export_collection_name: StringProperty(
+        name="Collection",
+        description="Collection used by safe curve to mesh export",
+        default="Curve Toolkit Mesh Export",
     )
 
     resolution_collection: PointerProperty(
@@ -2357,6 +2771,820 @@ class CTK_OT_refresh_resolution_batch(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CTK_OT_set_surface_from_active(bpy.types.Operator):
+    bl_idname = "curve_toolkit.set_surface_from_active"
+    bl_label = "Use Active Mesh"
+    bl_description = "Use the active mesh object as the Surface target"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.view_layer.objects.active
+        return obj is not None and obj.type == "MESH"
+
+    def execute(self, context):
+        settings = context.scene.curve_toolkit
+        settings.surface_object = context.view_layer.objects.active
+        self.report({"INFO"}, f"Surface set to {settings.surface_object.name}.")
+        return {"FINISHED"}
+
+
+class CTK_OT_surface_snap(bpy.types.Operator):
+    bl_idname = "curve_toolkit.surface_snap"
+    bl_label = "Surface Snap"
+    bl_description = "Snap selected curve points to the registered surface"
+    bl_options = {"REGISTER", "UNDO"}
+
+    mode: EnumProperty(
+        name="Mode",
+        items=(
+            ("ROOT", "Root", "Snap only the root control point"),
+            ("CURVE", "Curve", "Snap every control point"),
+            ("OFFSET", "Offset", "Move each curve so its root reaches the surface"),
+            ("PUSH_OUT", "Push Out", "Push points outside the surface offset distance"),
+        ),
+        default="ROOT",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_target_curve_objects(context))
+
+    def execute(self, context):
+        settings = context.scene.curve_toolkit
+        surface_obj = settings.surface_object
+        if surface_obj is None or surface_obj.type != "MESH":
+            self.report({"ERROR"}, "Set a mesh Surface first.")
+            return {"CANCELLED"}
+
+        curves = _target_curve_objects(context)
+        if not curves:
+            self.report({"ERROR"}, "Select at least one Curve object.")
+            return {"CANCELLED"}
+
+        _mode_set_object(context)
+        surface_data = _surface_bvh_from_object(context, surface_obj)
+        changed_count = 0
+        for curve_obj in curves:
+            for spline in _editable_splines(curve_obj):
+                if self.mode == "ROOT":
+                    changed_count += int(_move_spline_root_to_surface(curve_obj, spline, surface_data, settings.surface_offset))
+                elif self.mode == "CURVE":
+                    changed_count += int(_snap_spline_to_surface(curve_obj, spline, surface_data, settings.surface_offset))
+                elif self.mode == "OFFSET":
+                    changed_count += int(_offset_spline_root_to_surface(curve_obj, spline, surface_data, settings.surface_offset))
+                elif self.mode == "PUSH_OUT":
+                    changed_count += int(_push_spline_from_surface(curve_obj, spline, surface_data, settings.surface_offset))
+
+        context.view_layer.update()
+        if changed_count == 0:
+            self.report({"ERROR"}, "No curve points could be moved to the surface.")
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, f"Updated {changed_count} curve splines with Surface tools.")
+        return {"FINISHED"}
+
+
+class CTK_OT_length_store(bpy.types.Operator):
+    bl_idname = "curve_toolkit.length_store"
+    bl_label = "Store Length"
+    bl_description = "Store current selected curve spline lengths"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_target_curve_objects(context))
+
+    def execute(self, context):
+        curves = _target_curve_objects(context)
+        stored_count = sum(_store_lengths(curve_obj) for curve_obj in curves)
+        self.report({"INFO"}, f"Stored {stored_count} spline lengths.")
+        return {"FINISHED"}
+
+
+class CTK_OT_length_restore(bpy.types.Operator):
+    bl_idname = "curve_toolkit.length_restore"
+    bl_label = "Restore Length"
+    bl_description = "Restore previously stored selected curve spline lengths"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_target_curve_objects(context))
+
+    def execute(self, context):
+        _mode_set_object(context)
+        changed_count = 0
+        for curve_obj in _target_curve_objects(context):
+            lengths = _stored_lengths(curve_obj)
+            for spline, target_length in zip(_editable_splines(curve_obj), lengths):
+                changed_count += int(_set_spline_length(curve_obj, spline, float(target_length)))
+
+        context.view_layer.update()
+        if changed_count == 0:
+            self.report({"ERROR"}, "No stored lengths were found.")
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, f"Restored {changed_count} spline lengths.")
+        return {"FINISHED"}
+
+
+class CTK_OT_length_set(bpy.types.Operator):
+    bl_idname = "curve_toolkit.length_set"
+    bl_label = "Set Length"
+    bl_description = "Set selected curve splines to the Length value"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_target_curve_objects(context))
+
+    def execute(self, context):
+        settings = context.scene.curve_toolkit
+        _mode_set_object(context)
+        changed_count = 0
+        for curve_obj in _target_curve_objects(context):
+            for spline in _editable_splines(curve_obj):
+                changed_count += int(_set_spline_length(curve_obj, spline, settings.length_value))
+
+        context.view_layer.update()
+        if changed_count == 0:
+            self.report({"ERROR"}, "No spline length could be changed.")
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, f"Set {changed_count} spline lengths.")
+        return {"FINISHED"}
+
+
+class CTK_OT_length_match_active(bpy.types.Operator):
+    bl_idname = "curve_toolkit.length_match_active"
+    bl_label = "Match Active Length"
+    bl_description = "Set selected curve splines to the active curve's first spline length"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_curve(context) is not None
+
+    def execute(self, context):
+        active_curve = _active_curve(context)
+        active_splines = _editable_splines(active_curve)
+        if not active_splines:
+            self.report({"ERROR"}, "Active curve has no valid spline.")
+            return {"CANCELLED"}
+
+        target_length = _polyline_length(_spline_world_positions(active_curve, active_splines[0]))
+        _mode_set_object(context)
+        changed_count = 0
+        for curve_obj in _target_curve_objects(context):
+            for spline in _editable_splines(curve_obj):
+                changed_count += int(_set_spline_length(curve_obj, spline, target_length))
+
+        context.view_layer.update()
+        self.report({"INFO"}, f"Matched {changed_count} spline lengths to active curve.")
+        return {"FINISHED"}
+
+
+class CTK_OT_length_trim(bpy.types.Operator):
+    bl_idname = "curve_toolkit.length_trim"
+    bl_label = "Trim Length"
+    bl_description = "Trim root or tip by the Trim distance"
+    bl_options = {"REGISTER", "UNDO"}
+
+    mode: EnumProperty(
+        name="Mode",
+        items=(
+            ("ROOT", "Root", "Trim from the root"),
+            ("TIP", "Tip", "Trim from the tip"),
+        ),
+        default="TIP",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_target_curve_objects(context))
+
+    def execute(self, context):
+        settings = context.scene.curve_toolkit
+        _mode_set_object(context)
+        changed_count = 0
+        for curve_obj in _target_curve_objects(context):
+            for spline in _editable_splines(curve_obj):
+                root_amount = settings.trim_amount if self.mode == "ROOT" else 0.0
+                tip_amount = settings.trim_amount if self.mode == "TIP" else 0.0
+                changed_count += int(_trim_spline(curve_obj, spline, root_amount, tip_amount))
+
+        context.view_layer.update()
+        if changed_count == 0:
+            self.report({"ERROR"}, "Trim distance is too large or curves are invalid.")
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, f"Trimmed {changed_count} splines.")
+        return {"FINISHED"}
+
+
+class CTK_OT_profile_apply(bpy.types.Operator):
+    bl_idname = "curve_toolkit.profile_apply"
+    bl_label = "Apply Profile"
+    bl_description = "Apply the selected radius profile to selected curves"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_target_curve_objects(context))
+
+    def execute(self, context):
+        settings = context.scene.curve_toolkit
+        splines = []
+        for curve_obj in _target_curve_objects(context):
+            splines.extend(_editable_splines(curve_obj))
+
+        selected_mode = _has_selected_points(splines)
+        changed_count = 0
+        for spline in splines:
+            changed_count += _apply_radius_profile_to_spline(
+                spline,
+                settings.profile_preset,
+                settings.profile_root_radius,
+                settings.profile_tip_radius,
+                settings.profile_mid_radius,
+                selected_mode,
+            )
+
+        context.view_layer.update()
+        if changed_count == 0:
+            self.report({"ERROR"}, "No curve points found for radius profile.")
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, f"Applied radius profile to {changed_count} points.")
+        return {"FINISHED"}
+
+
+class CTK_OT_profile_copy(bpy.types.Operator):
+    bl_idname = "curve_toolkit.profile_copy"
+    bl_label = "Copy Profile"
+    bl_description = "Copy the active curve's first radius profile"
+    bl_options = {"REGISTER"}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_curve(context) is not None
+
+    def execute(self, context):
+        curve_obj = _active_curve(context)
+        splines = _editable_splines(curve_obj)
+        if not splines:
+            self.report({"ERROR"}, "Active curve has no valid spline.")
+            return {"CANCELLED"}
+
+        values = [_point_radius(point) for point in _spline_points(splines[0])]
+        context.scene.curve_toolkit.profile_clipboard = json.dumps(values)
+        self.report({"INFO"}, f"Copied radius profile with {len(values)} points.")
+        return {"FINISHED"}
+
+
+class CTK_OT_profile_paste(bpy.types.Operator):
+    bl_idname = "curve_toolkit.profile_paste"
+    bl_label = "Paste Profile"
+    bl_description = "Paste copied radius profile to selected curves"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_target_curve_objects(context))
+
+    def execute(self, context):
+        raw_values = context.scene.curve_toolkit.profile_clipboard
+        try:
+            values = json.loads(raw_values)
+        except (TypeError, ValueError):
+            values = []
+
+        if not values:
+            self.report({"ERROR"}, "Copy a radius profile first.")
+            return {"CANCELLED"}
+
+        curves = _target_curve_objects(context)
+        splines = [spline for curve_obj in curves for spline in _editable_splines(curve_obj)]
+        selected_mode = _has_selected_points(splines)
+        changed_count = 0
+        for spline in splines:
+            points = list(_spline_points(spline))
+            if selected_mode:
+                for run in _selected_index_runs(spline):
+                    changed_count += _apply_sampled_radius_values(points, run, values)
+            else:
+                changed_count += _apply_sampled_radius_values(points, list(range(len(points))), values)
+
+        context.view_layer.update()
+        self.report({"INFO"}, f"Pasted radius profile to {changed_count} points.")
+        return {"FINISHED"}
+
+
+class CTK_OT_bevel_assign(bpy.types.Operator):
+    bl_idname = "curve_toolkit.bevel_assign"
+    bl_label = "Assign Bevel"
+    bl_description = "Assign the Bevel Object to selected curves"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_target_curve_objects(context))
+
+    def execute(self, context):
+        settings = context.scene.curve_toolkit
+        bevel_obj = settings.bevel_object
+        if bevel_obj is None or bevel_obj.type != "CURVE":
+            self.report({"ERROR"}, "Choose a Curve Bevel Object first.")
+            return {"CANCELLED"}
+
+        changed_count = 0
+        for curve_obj in _target_curve_objects(context):
+            if curve_obj == bevel_obj:
+                continue
+            curve_obj.data.bevel_object = bevel_obj
+            changed_count += 1
+
+        self.report({"INFO"}, f"Assigned bevel object to {changed_count} curves.")
+        return {"FINISHED"}
+
+
+class CTK_OT_bevel_copy_active(bpy.types.Operator):
+    bl_idname = "curve_toolkit.bevel_copy_active"
+    bl_label = "Copy Active Bevel"
+    bl_description = "Copy the active curve's bevel object to selected curves"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_curve(context) is not None
+
+    def execute(self, context):
+        active = _active_curve(context)
+        bevel_obj = active.data.bevel_object
+        if bevel_obj is None:
+            self.report({"ERROR"}, "Active curve has no bevel object.")
+            return {"CANCELLED"}
+
+        changed_count = 0
+        for curve_obj in _target_curve_objects(context):
+            if curve_obj != active:
+                curve_obj.data.bevel_object = bevel_obj
+                changed_count += 1
+
+        self.report({"INFO"}, f"Copied active bevel object to {changed_count} curves.")
+        return {"FINISHED"}
+
+
+class CTK_OT_bevel_clear(bpy.types.Operator):
+    bl_idname = "curve_toolkit.bevel_clear"
+    bl_label = "Clear Bevel"
+    bl_description = "Clear bevel objects from selected curves"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_target_curve_objects(context))
+
+    def execute(self, context):
+        changed_count = 0
+        for curve_obj in _target_curve_objects(context):
+            curve_obj.data.bevel_object = None
+            changed_count += 1
+
+        self.report({"INFO"}, f"Cleared bevel objects from {changed_count} curves.")
+        return {"FINISHED"}
+
+
+class CTK_OT_bevel_select_same(bpy.types.Operator):
+    bl_idname = "curve_toolkit.bevel_select_same"
+    bl_label = "Select Same Bevel"
+    bl_description = "Select scene curves using the same bevel object as the active curve"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_curve(context) is not None
+
+    def execute(self, context):
+        active = _active_curve(context)
+        bevel_obj = active.data.bevel_object
+        if bevel_obj is None:
+            self.report({"ERROR"}, "Active curve has no bevel object.")
+            return {"CANCELLED"}
+
+        count = 0
+        for obj in context.scene.objects:
+            selected = obj.type == "CURVE" and obj.data.bevel_object == bevel_obj
+            obj.select_set(selected)
+            count += int(selected)
+
+        context.view_layer.objects.active = active
+        self.report({"INFO"}, f"Selected {count} curves with the same bevel object.")
+        return {"FINISHED"}
+
+
+class CTK_OT_validate_curves(bpy.types.Operator):
+    bl_idname = "curve_toolkit.validate_curves"
+    bl_label = "Check Hair Curves"
+    bl_description = "Validate selected curves and summarize common workflow issues"
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        settings = context.scene.curve_toolkit
+        curves = _target_or_scene_curve_objects(context)
+        problem_objects = []
+        issue_counts = {
+            "missing bevel": 0,
+            "zero length": 0,
+            "close points": 0,
+            "non-applied scale": 0,
+            "closed spline": 0,
+            "twist lock": 0,
+        }
+
+        for curve_obj in curves:
+            has_problem = False
+            if curve_obj.data.bevel_object is None:
+                issue_counts["missing bevel"] += 1
+                has_problem = True
+            if any(abs(value - 1.0) > 1.0e-4 for value in curve_obj.scale):
+                issue_counts["non-applied scale"] += 1
+                has_problem = True
+            if _custom_bool(curve_obj, "ctk_lock_twist", "hmt_lock_twist"):
+                issue_counts["twist lock"] += 1
+                has_problem = True
+
+            for spline in curve_obj.data.splines:
+                if not _is_supported_spline(spline):
+                    continue
+                if _is_closed_spline(spline):
+                    issue_counts["closed spline"] += 1
+                    has_problem = True
+                positions = _spline_world_positions(curve_obj, spline)
+                if len(positions) < 2 or _polyline_length(positions) <= MIN_BONE_LENGTH:
+                    issue_counts["zero length"] += 1
+                    has_problem = True
+                if any((positions[index + 1] - positions[index]).length <= MIN_BONE_LENGTH for index in range(len(positions) - 1)):
+                    issue_counts["close points"] += 1
+                    has_problem = True
+
+            if has_problem:
+                problem_objects.append(curve_obj.name)
+
+        active_counts = [f"{name}: {count}" for name, count in issue_counts.items() if count]
+        report = f"Checked {len(curves)} curves. Problems: {len(problem_objects)}."
+        if active_counts:
+            report += " " + "; ".join(active_counts)
+        settings.validation_report = report
+        settings.validation_problem_objects = json.dumps(problem_objects)
+        self.report({"INFO"}, report)
+        return {"FINISHED"}
+
+
+class CTK_OT_select_validation_problems(bpy.types.Operator):
+    bl_idname = "curve_toolkit.select_validation_problems"
+    bl_label = "Select Problems"
+    bl_description = "Select curves found by the last validation"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        try:
+            names = json.loads(context.scene.curve_toolkit.validation_problem_objects)
+        except (TypeError, ValueError):
+            names = []
+
+        if not names:
+            self.report({"ERROR"}, "Run Check Hair Curves first.")
+            return {"CANCELLED"}
+
+        count = 0
+        for obj in context.scene.objects:
+            selected = obj.name in names
+            obj.select_set(selected)
+            count += int(selected)
+
+        self.report({"INFO"}, f"Selected {count} problem curves.")
+        return {"FINISHED"}
+
+
+class CTK_OT_apply_lod_preset(bpy.types.Operator):
+    bl_idname = "curve_toolkit.apply_lod_preset"
+    bl_label = "Apply LOD"
+    bl_description = "Apply viewport and render resolution presets"
+    bl_options = {"REGISTER", "UNDO"}
+
+    preset: EnumProperty(
+        name="Preset",
+        items=(
+            ("DRAFT", "Draft", "Low resolution for fast editing"),
+            ("WORK", "Work", "Balanced working resolution"),
+            ("FINAL", "Final", "Higher resolution and filled caps"),
+        ),
+        default="WORK",
+    )
+
+    def execute(self, context):
+        global _RESOLUTION_BATCH_UPDATE_RUNNING
+
+        settings = context.scene.curve_toolkit
+        preset_values = {
+            "DRAFT": (1, 0, False),
+            "WORK": (2, 2, False),
+            "FINAL": (8, 4, True),
+        }
+        path_resolution, bevel_resolution, fill_caps = preset_values[self.preset]
+
+        curves = _target_curve_objects(context)
+        if not curves:
+            collections = _resolution_batch_collections(settings)
+            curves, bevel_references = _resolution_batch_targets_from_collections(collections)
+        else:
+            bevel_references = sorted(
+                {obj.data.bevel_object for obj in curves if obj.data.bevel_object is not None and obj.data.bevel_object.type == "CURVE"},
+                key=lambda obj: obj.name,
+            )
+
+        for curve_obj in curves:
+            _set_curve_data_resolution(curve_obj, path_resolution)
+            curve_obj.data.use_fill_caps = fill_caps
+        for bevel_obj in bevel_references:
+            _set_curve_data_resolution(bevel_obj, bevel_resolution)
+
+        _RESOLUTION_BATCH_UPDATE_RUNNING = True
+        try:
+            settings.path_resolution = path_resolution
+            settings.bevel_reference_resolution = bevel_resolution
+        finally:
+            _RESOLUTION_BATCH_UPDATE_RUNNING = False
+
+        self.report({"INFO"}, f"Applied {self.preset.title()} LOD to {len(curves)} curves and {len(bevel_references)} bevel references.")
+        return {"FINISHED"}
+
+
+class CTK_OT_select_curve_points(bpy.types.Operator):
+    bl_idname = "curve_toolkit.select_curve_points"
+    bl_label = "Select Points"
+    bl_description = "Select root, tip, all, or no control points on selected curves"
+    bl_options = {"REGISTER", "UNDO"}
+
+    mode: EnumProperty(
+        name="Mode",
+        items=(
+            ("ROOT", "Root", "Select root points"),
+            ("TIP", "Tip", "Select tip points"),
+            ("ALL", "All", "Select all points"),
+            ("NONE", "None", "Clear point selection"),
+        ),
+        default="ROOT",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_target_curve_objects(context))
+
+    def execute(self, context):
+        changed_count = 0
+        for curve_obj in _target_curve_objects(context):
+            for spline in _editable_splines(curve_obj):
+                points = list(_spline_points(spline))
+                for index, point in enumerate(points):
+                    selected = (
+                        self.mode == "ALL"
+                        or (self.mode == "ROOT" and index == 0)
+                        or (self.mode == "TIP" and index == len(points) - 1)
+                    )
+                    if self.mode == "NONE":
+                        selected = False
+
+                    if spline.type == "BEZIER":
+                        point.select_control_point = selected
+                        point.select_left_handle = False
+                        point.select_right_handle = False
+                    else:
+                        point.select = selected
+                    changed_count += int(selected)
+
+        self.report({"INFO"}, f"Selected {changed_count} curve points.")
+        return {"FINISHED"}
+
+
+class CTK_OT_select_curves_by_length(bpy.types.Operator):
+    bl_idname = "curve_toolkit.select_curves_by_length"
+    bl_label = "Select By Length"
+    bl_description = "Select scene curves shorter or longer than the Length threshold"
+    bl_options = {"REGISTER", "UNDO"}
+
+    mode: EnumProperty(
+        name="Mode",
+        items=(
+            ("SHORTER", "Shorter", "Select curves shorter than Length"),
+            ("LONGER", "Longer", "Select curves longer than Length"),
+        ),
+        default="SHORTER",
+    )
+
+    def execute(self, context):
+        threshold = context.scene.curve_toolkit.selection_length_threshold
+        count = 0
+        for obj in context.scene.objects:
+            if obj.type != "CURVE":
+                obj.select_set(False)
+                continue
+
+            max_length = max((_polyline_length(_spline_world_positions(obj, spline)) for spline in _editable_splines(obj)), default=0.0)
+            selected = max_length < threshold if self.mode == "SHORTER" else max_length > threshold
+            obj.select_set(selected)
+            count += int(selected)
+
+        self.report({"INFO"}, f"Selected {count} curves by length.")
+        return {"FINISHED"}
+
+
+class CTK_OT_convert_curves_to_mesh(bpy.types.Operator):
+    bl_idname = "curve_toolkit.convert_curves_to_mesh"
+    bl_label = "Export Mesh Copy"
+    bl_description = "Create mesh copies of selected curves in a separate collection"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_target_curve_objects(context))
+
+    def execute(self, context):
+        settings = context.scene.curve_toolkit
+        collection = bpy.data.collections.get(settings.export_collection_name)
+        if collection is None:
+            collection = bpy.data.collections.new(settings.export_collection_name)
+            context.scene.collection.children.link(collection)
+
+        depsgraph = context.evaluated_depsgraph_get()
+        created = []
+        for curve_obj in _target_curve_objects(context):
+            eval_obj = curve_obj.evaluated_get(depsgraph)
+            mesh = bpy.data.meshes.new_from_object(eval_obj, depsgraph=depsgraph)
+            mesh.name = _unique_name(f"{curve_obj.name}_mesh", bpy.data.meshes.keys())
+            mesh_obj = bpy.data.objects.new(_unique_name(f"{curve_obj.name}_mesh", bpy.data.objects.keys()), mesh)
+            mesh_obj.matrix_world = curve_obj.matrix_world.copy()
+            for slot in curve_obj.material_slots:
+                if slot.material is not None:
+                    mesh.materials.append(slot.material)
+            collection.objects.link(mesh_obj)
+            created.append(mesh_obj)
+
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        for obj in created:
+            obj.select_set(True)
+        if created:
+            context.view_layer.objects.active = created[0]
+
+        self.report({"INFO"}, f"Created {len(created)} mesh copies in {collection.name}.")
+        return {"FINISHED"}
+
+
+class CTK_OT_convert_hair_curves_to_curve(bpy.types.Operator):
+    bl_idname = "curve_toolkit.convert_hair_curves_to_curve"
+    bl_label = "Hair Curves to Curve"
+    bl_description = "Convert active Hair Curves object to a legacy Curve object for Curve Toolkit tools"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.view_layer.objects.active
+        return obj is not None and obj.type == "CURVES"
+
+    def execute(self, context):
+        source_obj = context.view_layer.objects.active
+        source_data = source_obj.data
+        if len(source_data.curves) == 0:
+            self.report({"ERROR"}, "Active Hair Curves object has no curves.")
+            return {"CANCELLED"}
+
+        curve_data = bpy.data.curves.new(_unique_name(f"{source_obj.name}_curve", bpy.data.curves.keys()), "CURVE")
+        curve_data.dimensions = "3D"
+        curve_data.resolution_u = 2
+        curve_data.render_resolution_u = 2
+
+        for source_curve in source_data.curves:
+            if source_curve.points_length < 2:
+                continue
+            spline = curve_data.splines.new("POLY")
+            spline.points.add(source_curve.points_length - 1)
+            for target_point, source_point in zip(spline.points, source_curve.points):
+                position = source_point.position
+                target_point.co = (position.x, position.y, position.z, 1.0)
+                target_point.radius = source_point.radius
+
+        if not curve_data.splines:
+            bpy.data.curves.remove(curve_data)
+            self.report({"ERROR"}, "Hair Curves object has no curve with at least 2 points.")
+            return {"CANCELLED"}
+
+        curve_obj = bpy.data.objects.new(_unique_name(f"{source_obj.name}_curve", bpy.data.objects.keys()), curve_data)
+        curve_obj.matrix_world = source_obj.matrix_world.copy()
+        _link_target_collection(context, source_obj).objects.link(curve_obj)
+        _set_active_only(context, curve_obj)
+        self.report({"INFO"}, f"Converted Hair Curves to {curve_obj.name}.")
+        return {"FINISHED"}
+
+
+def _flat_curve_point_indices(curve_obj):
+    indices = []
+    flat_index = 0
+    for spline in curve_obj.data.splines:
+        if not _is_supported_spline(spline):
+            continue
+        for point in _spline_points(spline):
+            indices.append((flat_index, spline, point))
+            flat_index += 1
+    return indices
+
+
+def _point_segment_distance(point, start, end):
+    segment = end - start
+    if segment.length <= MIN_BONE_LENGTH:
+        return (point - start).length
+    factor = max(0.0, min(1.0, (point - start).dot(segment) / segment.length_squared))
+    return (point - (start + segment * factor)).length
+
+
+def _nearest_bone_name(armature_obj, world_position):
+    best_name = ""
+    best_distance = None
+    for bone in armature_obj.data.bones:
+        head = armature_obj.matrix_world @ bone.head_local
+        tail = armature_obj.matrix_world @ bone.tail_local
+        distance = _point_segment_distance(world_position, head, tail)
+        if best_distance is None or distance < best_distance:
+            best_name = bone.name
+            best_distance = distance
+    return best_name
+
+
+class CTK_OT_bind_hooks_to_armature(bpy.types.Operator):
+    bl_idname = "curve_toolkit.bind_hooks_to_armature"
+    bl_label = "Bind Hooks"
+    bl_description = "Add Hook modifiers from selected curve points to the nearest armature bones"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_target_curve_objects(context)) and _active_or_selected_armature(context) is not None
+
+    def execute(self, context):
+        armature_obj = _active_or_selected_armature(context)
+        if armature_obj is None or not armature_obj.data.bones:
+            self.report({"ERROR"}, "Select an armature with bones.")
+            return {"CANCELLED"}
+
+        _mode_set_object(context)
+        hook_count = 0
+        for curve_obj in _target_curve_objects(context):
+            for flat_index, spline, point in _flat_curve_point_indices(curve_obj):
+                bone_name = _nearest_bone_name(armature_obj, _point_world_co(curve_obj, spline, point))
+                if not bone_name:
+                    continue
+                modifier = curve_obj.modifiers.new(_unique_name(f"CTK Hook {bone_name}", [item.name for item in curve_obj.modifiers]), "HOOK")
+                modifier.object = armature_obj
+                modifier.subtarget = bone_name
+                try:
+                    modifier.vertex_indices_set([flat_index])
+                except RuntimeError:
+                    curve_obj.modifiers.remove(modifier)
+                    continue
+                hook_count += 1
+
+        if hook_count == 0:
+            self.report({"ERROR"}, "No hook modifiers could be created.")
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, f"Created {hook_count} hook modifiers.")
+        return {"FINISHED"}
+
+
+class CTK_OT_clear_hook_modifiers(bpy.types.Operator):
+    bl_idname = "curve_toolkit.clear_hook_modifiers"
+    bl_label = "Clear Hooks"
+    bl_description = "Remove Hook modifiers from selected curves"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_target_curve_objects(context))
+
+    def execute(self, context):
+        removed_count = 0
+        for curve_obj in _target_curve_objects(context):
+            for modifier in list(curve_obj.modifiers):
+                if modifier.type == "HOOK":
+                    curve_obj.modifiers.remove(modifier)
+                    removed_count += 1
+
+        self.report({"INFO"}, f"Removed {removed_count} hook modifiers.")
+        return {"FINISHED"}
+
+
 class CTK_PT_tools(bpy.types.Panel):
     bl_label = "Curve Toolkit"
     bl_idname = "CTK_PT_tools"
@@ -2420,6 +3648,55 @@ class CTK_PT_tools(bpy.types.Panel):
             op = row.operator(CTK_OT_snap_cursor.bl_idname, text="Center")
             op.mode = "CENTER"
 
+        surface_box = layout.box()
+        if self._draw_foldout(surface_box, settings, "show_surface_tools", "Surface Tools", "MOD_SHRINKWRAP"):
+            row = surface_box.row(align=True)
+            row.prop(settings, "surface_object")
+            row.operator(CTK_OT_set_surface_from_active.bl_idname, text="", icon="EYEDROPPER")
+            surface_box.prop(settings, "surface_offset")
+
+            row = surface_box.row(align=True)
+            op = row.operator(CTK_OT_surface_snap.bl_idname, text="Snap Root")
+            op.mode = "ROOT"
+            op = row.operator(CTK_OT_surface_snap.bl_idname, text="Snap Curve")
+            op.mode = "CURVE"
+            row = surface_box.row(align=True)
+            op = row.operator(CTK_OT_surface_snap.bl_idname, text="Offset Curve")
+            op.mode = "OFFSET"
+            op = row.operator(CTK_OT_surface_snap.bl_idname, text="Push Out")
+            op.mode = "PUSH_OUT"
+
+        length_box = layout.box()
+        if self._draw_foldout(length_box, settings, "show_length_tools", "Length Tools", "DRIVER_DISTANCE"):
+            row = length_box.row(align=True)
+            row.prop(settings, "length_value")
+            row.operator(CTK_OT_length_set.bl_idname)
+            length_box.operator(CTK_OT_length_match_active.bl_idname)
+
+            row = length_box.row(align=True)
+            row.prop(settings, "trim_amount")
+            op = row.operator(CTK_OT_length_trim.bl_idname, text="Root")
+            op.mode = "ROOT"
+            op = row.operator(CTK_OT_length_trim.bl_idname, text="Tip")
+            op.mode = "TIP"
+
+            row = length_box.row(align=True)
+            row.operator(CTK_OT_length_store.bl_idname)
+            row.operator(CTK_OT_length_restore.bl_idname)
+
+        profile_box = layout.box()
+        if self._draw_foldout(profile_box, settings, "show_profile_tools", "Profile / Taper", "IPO_EASE_IN_OUT"):
+            profile_box.prop(settings, "profile_preset")
+            row = profile_box.row(align=True)
+            row.prop(settings, "profile_root_radius")
+            row.prop(settings, "profile_mid_radius")
+            row.prop(settings, "profile_tip_radius")
+            profile_box.operator(CTK_OT_profile_apply.bl_idname)
+
+            row = profile_box.row(align=True)
+            row.operator(CTK_OT_profile_copy.bl_idname)
+            row.operator(CTK_OT_profile_paste.bl_idname)
+
         resolution_box = layout.box()
         if self._draw_foldout(resolution_box, settings, "show_resolution_batch", "Resolution Batch", "OUTLINER_COLLECTION"):
             row = resolution_box.row(align=True)
@@ -2442,6 +3719,16 @@ class CTK_PT_tools(bpy.types.Panel):
             resolution_box.prop(settings, "path_resolution")
             resolution_box.prop(settings, "bevel_reference_resolution")
             resolution_box.operator(CTK_OT_refresh_resolution_batch.bl_idname)
+
+        bevel_box = layout.box()
+        if self._draw_foldout(bevel_box, settings, "show_bevel_manager", "Bevel Manager", "CURVE_BEZCURVE"):
+            bevel_box.prop(settings, "bevel_object")
+            row = bevel_box.row(align=True)
+            row.operator(CTK_OT_bevel_assign.bl_idname)
+            row.operator(CTK_OT_bevel_copy_active.bl_idname)
+            row = bevel_box.row(align=True)
+            row.operator(CTK_OT_bevel_clear.bl_idname)
+            row.operator(CTK_OT_bevel_select_same.bl_idname)
 
         smooth_box = layout.box()
         if self._draw_foldout(smooth_box, settings, "show_smooth_reset", "Smooth / Reset", "MOD_SMOOTH"):
@@ -2480,6 +3767,42 @@ class CTK_PT_tools(bpy.types.Panel):
             op.mode = "TIP"
             op.enabled = False
 
+        validation_box = layout.box()
+        if self._draw_foldout(validation_box, settings, "show_validation_tools", "Validation", "CHECKMARK"):
+            validation_box.operator(CTK_OT_validate_curves.bl_idname)
+            validation_box.label(text=settings.validation_report)
+            validation_box.operator(CTK_OT_select_validation_problems.bl_idname)
+
+        lod_box = layout.box()
+        if self._draw_foldout(lod_box, settings, "show_lod_tools", "LOD Tools", "SETTINGS"):
+            row = lod_box.row(align=True)
+            op = row.operator(CTK_OT_apply_lod_preset.bl_idname, text="Draft")
+            op.preset = "DRAFT"
+            op = row.operator(CTK_OT_apply_lod_preset.bl_idname, text="Work")
+            op.preset = "WORK"
+            op = row.operator(CTK_OT_apply_lod_preset.bl_idname, text="Final")
+            op.preset = "FINAL"
+
+        selection_box = layout.box()
+        if self._draw_foldout(selection_box, settings, "show_selection_tools", "Selection Tools", "RESTRICT_SELECT_OFF"):
+            row = selection_box.row(align=True)
+            op = row.operator(CTK_OT_select_curve_points.bl_idname, text="Roots")
+            op.mode = "ROOT"
+            op = row.operator(CTK_OT_select_curve_points.bl_idname, text="Tips")
+            op.mode = "TIP"
+            row = selection_box.row(align=True)
+            op = row.operator(CTK_OT_select_curve_points.bl_idname, text="All Points")
+            op.mode = "ALL"
+            op = row.operator(CTK_OT_select_curve_points.bl_idname, text="Clear Points")
+            op.mode = "NONE"
+
+            selection_box.prop(settings, "selection_length_threshold")
+            row = selection_box.row(align=True)
+            op = row.operator(CTK_OT_select_curves_by_length.bl_idname, text="Shorter")
+            op.mode = "SHORTER"
+            op = row.operator(CTK_OT_select_curves_by_length.bl_idname, text="Longer")
+            op.mode = "LONGER"
+
         mirror_box = layout.box()
         if self._draw_foldout(mirror_box, settings, "show_mirror", "Mirror", "MOD_MIRROR"):
             mirror_box.operator(CTK_OT_duplicate_mirror_selected_curves.bl_idname)
@@ -2494,6 +3817,12 @@ class CTK_PT_tools(bpy.types.Panel):
             op = row.operator(CTK_OT_set_fill_caps.bl_idname, text="Ends", depress=cap_root and cap_tip)
             op.mode = "BOTH"
             caps_box.operator(CTK_OT_set_fill_caps.bl_idname, text="Open Caps", depress=caps_open).mode = "OPEN"
+
+        convert_box = layout.box()
+        if self._draw_foldout(convert_box, settings, "show_convert_tools", "Convert / Bridge", "MESH_DATA"):
+            convert_box.prop(settings, "export_collection_name")
+            convert_box.operator(CTK_OT_convert_curves_to_mesh.bl_idname)
+            convert_box.operator(CTK_OT_convert_hair_curves_to_curve.bl_idname)
 
         rigging_box = layout.box()
         if self._draw_foldout(rigging_box, settings, "show_rigging", "Rigging", "ARMATURE_DATA"):
@@ -2528,11 +3857,37 @@ class CTK_PT_tools(bpy.types.Panel):
             invert_row = rigging_box.row(align=True)
             invert_row.enabled = armature_obj is not None
             invert_row.operator(CTK_OT_invert_selected_bones.bl_idname)
+            row = rigging_box.row(align=True)
+            row.operator(CTK_OT_bind_hooks_to_armature.bl_idname)
+            row.operator(CTK_OT_clear_hook_modifiers.bl_idname)
 
 
 classes = (
     CTK_PG_resolution_collection_item,
     CTK_PG_settings,
+    CTK_OT_set_surface_from_active,
+    CTK_OT_surface_snap,
+    CTK_OT_length_store,
+    CTK_OT_length_restore,
+    CTK_OT_length_set,
+    CTK_OT_length_match_active,
+    CTK_OT_length_trim,
+    CTK_OT_profile_apply,
+    CTK_OT_profile_copy,
+    CTK_OT_profile_paste,
+    CTK_OT_bevel_assign,
+    CTK_OT_bevel_copy_active,
+    CTK_OT_bevel_clear,
+    CTK_OT_bevel_select_same,
+    CTK_OT_validate_curves,
+    CTK_OT_select_validation_problems,
+    CTK_OT_apply_lod_preset,
+    CTK_OT_select_curve_points,
+    CTK_OT_select_curves_by_length,
+    CTK_OT_convert_curves_to_mesh,
+    CTK_OT_convert_hair_curves_to_curve,
+    CTK_OT_bind_hooks_to_armature,
+    CTK_OT_clear_hook_modifiers,
     CTK_OT_generate_bones_from_active_curve,
     CTK_OT_generate_custom_bones_from_active_curve,
     CTK_OT_invert_selected_bones,
