@@ -10,11 +10,9 @@ Blender addon for curve modeling helpers and bone chain generation.
 ## Install
 
 1. Zip the repository files so `blender_manifest.toml` is at the zip root.
-2. In Blender, open `Edit > Preferences > Get Extensions`.
+2. In Blender, open `Edit > Preferences > Addon`.
 3. Use `Install from Disk` and select the zip.
 4. Enable `Curve Toolkit`.
-
-Uninstall the old `Bone to Curve` or `Hair Modeling Toolkit` extension before installing this version because the extension id changed.
 
 ## Curve Controls
 
