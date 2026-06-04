@@ -149,14 +149,24 @@ The number of bones follows the number of control points. Bone positions are res
 
 In the panel this is shown under `From Control Points` with the `Generate From Points` button.
 
-`Generate Custom Bones` creates a new armature with the chosen `Bone Count`. `0` follows the target node interval count.
+`Generate Custom Bones` creates a new armature with the chosen `Bone Count`. `0` follows the target segment range.
 
 In the panel this is shown under `Custom Count` with the `Generate Custom Count` button.
 
-- `End To End`: ignores target nodes and fills from curve root to tip.
-- `From Root`: starts from the root side of the target node range.
-- `From Tip`: starts from the tip side of the target node range while keeping every bone tail pointed toward the tip.
-- `Start Node` and `End Node` use 1-based node numbers. `0` means auto, so `0-0` uses the full spline.
+- `End To End`: ignores segment range and fills from curve root to tip.
+- `From Root`: reads `Start Segment` and `End Segment` from root toward tip.
+- `From Tip`: reads `Start Segment` and `End Segment` from tip toward root.
+- `Start Segment` and `End Segment` use direction-relative segment boundaries. Start `0` means the fill start endpoint. End `0` means the fill end endpoint, so `0-0` uses the full spline.
+- Example: `From Tip` with `Start Segment` 0, `End Segment` 3, and `Bone Count` 0 creates 3 bones starting from the tip toward the root.
+- If `Bone Count` is greater than 0, the selected range stays the same and is resampled to that exact bone count.
+
+`Bone Control` applies the same visual path sampling to existing armatures. Keep the curve as the active object, select the target armature too, and select a linear connected bone chain before running these tools.
+
+- `Distribution`: chooses `Evenly` or `Curve` for generated custom bones and selected bone chains.
+- `Curvature Bias`: controls how strongly `Curve` distribution concentrates joints in curved areas.
+- `Apply Bone Distribution`: repositions the selected bone chain onto the active drawn curve without adding bones.
+- `Subdivide Cuts`: controls how many new bones are inserted into each selected bone.
+- `Subdivide Selected Bones`: subdivides the selected chain, then resamples the result onto the active drawn curve immediately.
 
 `Invert Selected Bones` reverses selected armature bones and flips connected parent order. It is available when the active object is an armature.
 

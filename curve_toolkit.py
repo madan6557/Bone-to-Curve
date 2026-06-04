@@ -986,22 +986,6 @@ def _resample_path_by_bone_count(path_points, bone_count):
     ]
 
 
-def _resample_path_segment_by_bone_count(path_points, start_distance, end_distance, bone_count):
-    total_length = _polyline_length(path_points)
-    if total_length <= MIN_BONE_LENGTH or bone_count < 1:
-        return []
-
-    start_distance = max(0.0, min(total_length, start_distance))
-    end_distance = max(0.0, min(total_length, end_distance))
-    if end_distance - start_distance <= MIN_BONE_LENGTH:
-        return []
-
-    return [
-        _point_at_distance(path_points, start_distance + (end_distance - start_distance) * index / bone_count)
-        for index in range(bone_count + 1)
-    ]
-
-
 def _resample_path_by_point_count(path_points, point_count):
     total_length = _polyline_length(path_points)
     if total_length <= MIN_BONE_LENGTH or point_count < 2:
@@ -2357,54 +2341,86 @@ def _collect_valid_chains(context, curve_obj):
     return chains, skipped_splines
 
 
-def _clamp_node_index(value, control_count):
-    return max(1, min(control_count, int(value)))
+def _clamp_segment_offset(value, segment_count):
+    return max(0, min(segment_count, int(value)))
 
 
-def _custom_node_range(control_count, bone_count, fill_mode, start_node, end_node):
+def _custom_segment_range(control_count, fill_mode, start_segment, end_segment):
     if control_count < 2:
         return None
 
+    segment_count = control_count - 1
     if fill_mode == "END_TO_END":
-        return 1, control_count
+        return 0, segment_count
 
-    start_node = 1 if start_node == 0 else _clamp_node_index(start_node, control_count)
-    end_node = control_count if end_node == 0 else _clamp_node_index(end_node, control_count)
-    range_start = min(start_node, end_node)
-    range_end = max(start_node, end_node)
+    start_offset = 0 if start_segment == 0 else _clamp_segment_offset(start_segment, segment_count)
+    end_offset = segment_count if end_segment == 0 else _clamp_segment_offset(end_segment, segment_count)
+    range_start = min(start_offset, end_offset)
+    range_end = max(start_offset, end_offset)
 
-    if range_end - range_start < 1:
+    if range_end - range_start <= 0:
         return None
 
-    interval_count = range_end - range_start
-    if bone_count <= 0:
-        return range_start, range_end
-    if fill_mode == "FROM_ROOT" and bone_count <= interval_count:
-        return range_start, range_start + bone_count
-    if fill_mode == "FROM_TIP" and bone_count <= interval_count:
-        return range_end - bone_count, range_end
+    if fill_mode == "FROM_TIP":
+        return segment_count - range_start, segment_count - range_end
 
     return range_start, range_end
 
 
-def _custom_bone_count(requested_bone_count, range_start, range_end):
+def _custom_bone_count(requested_bone_count, start_segment, end_segment):
     if requested_bone_count > 0:
         return requested_bone_count
-    return max(1, range_end - range_start)
+    return max(1, abs(end_segment - start_segment))
 
 
-def _node_distance(total_length, control_count, node_index):
-    return total_length * (node_index - 1) / (control_count - 1)
+def _segment_distance(total_length, segment_count, segment_index):
+    if segment_count < 1:
+        return 0.0
+    return total_length * segment_index / segment_count
 
 
-def _collect_custom_chains(context, curve_obj, bone_count, fill_mode, start_node, end_node):
+def _bone_joints_on_path(path_points, start_distance, end_distance, bone_count, distribution_mode, curvature_bias):
+    if bone_count < 1:
+        return []
+
+    reverse = start_distance > end_distance
+    range_start = min(start_distance, end_distance)
+    range_end = max(start_distance, end_distance)
+
+    if distribution_mode == "CURVE":
+        distances = _path_weighted_distances(path_points, range_start, range_end, bone_count + 1, curvature_bias)
+    else:
+        distances = []
+
+    if len(distances) != bone_count + 1:
+        distances = [
+            range_start + (range_end - range_start) * index / bone_count
+            for index in range(bone_count + 1)
+        ]
+
+    joints = [_point_at_distance(path_points, distance) for distance in distances]
+    if reverse:
+        joints.reverse()
+    return joints
+
+
+def _collect_custom_chains(
+    context,
+    curve_obj,
+    bone_count,
+    fill_mode,
+    start_segment,
+    end_segment,
+    distribution_mode,
+    curvature_bias,
+):
     chains = []
     skipped_splines = 0
 
     for spline in curve_obj.data.splines:
         control_count = _control_point_count(spline)
-        node_range = _custom_node_range(control_count, bone_count, fill_mode, start_node, end_node)
-        if node_range is None:
+        segment_range = _custom_segment_range(control_count, fill_mode, start_segment, end_segment)
+        if segment_range is None:
             skipped_splines += 1
             continue
 
@@ -2418,11 +2434,19 @@ def _collect_custom_chains(context, curve_obj, bone_count, fill_mode, start_node
             skipped_splines += 1
             continue
 
-        range_start, range_end = node_range
+        segment_count = control_count - 1
+        range_start, range_end = segment_range
         resolved_bone_count = _custom_bone_count(bone_count, range_start, range_end)
-        start_distance = _node_distance(total_length, control_count, range_start)
-        end_distance = _node_distance(total_length, control_count, range_end)
-        joints = _resample_path_segment_by_bone_count(path_points, start_distance, end_distance, resolved_bone_count)
+        start_distance = _segment_distance(total_length, segment_count, range_start)
+        end_distance = _segment_distance(total_length, segment_count, range_end)
+        joints = _bone_joints_on_path(
+            path_points,
+            start_distance,
+            end_distance,
+            resolved_bone_count,
+            distribution_mode,
+            curvature_bias,
+        )
         if len(joints) < 2:
             skipped_splines += 1
             continue
@@ -2577,6 +2601,181 @@ def _selected_edit_bone_chains(edit_bones, selected_names):
         return None
 
     return chains
+
+
+def _curve_path_candidates(context, curve_obj):
+    candidates = []
+    for spline in curve_obj.data.splines:
+        if _control_point_count(spline) < 2:
+            continue
+
+        path_points = _evaluated_spline_path_points(context, curve_obj, spline)
+        if len(path_points) < 2 or not _has_valid_segment(path_points):
+            continue
+
+        candidates.append(path_points)
+
+    return candidates
+
+
+def _path_projection(path_points, world_position):
+    distance = _distance_on_path_nearest(path_points, world_position)
+    projected = _point_at_distance(path_points, distance)
+    return distance, (world_position - projected).length_squared
+
+
+def _best_path_for_edit_bone_chain(path_candidates, armature_obj, edit_bones, chain):
+    if not path_candidates or not chain:
+        return None
+
+    first_bone = edit_bones.get(chain[0])
+    last_bone = edit_bones.get(chain[-1])
+    if first_bone is None or last_bone is None:
+        return None
+
+    start_world = armature_obj.matrix_world @ first_bone.head
+    end_world = armature_obj.matrix_world @ last_bone.tail
+    best = None
+
+    for path_points in path_candidates:
+        start_distance, start_score = _path_projection(path_points, start_world)
+        end_distance, end_score = _path_projection(path_points, end_world)
+        score = start_score + end_score
+        if best is None or score < best[0]:
+            best = (score, path_points, start_distance, end_distance)
+
+    if best is None:
+        return None
+    return best[1], best[2], best[3]
+
+
+def _set_edit_bone_chain_positions(armature_obj, edit_bones, chain, joints):
+    if len(joints) != len(chain) + 1:
+        return 0
+
+    matrix_world_inverted = armature_obj.matrix_world.inverted()
+    local_joints = [matrix_world_inverted @ joint for joint in joints]
+    changed_count = 0
+
+    for index, name in enumerate(chain):
+        bone = edit_bones.get(name)
+        if bone is None:
+            continue
+
+        bone.head = local_joints[index]
+        bone.tail = local_joints[index + 1]
+
+        if index == 0:
+            bone.use_connect = False
+        else:
+            parent = edit_bones.get(chain[index - 1])
+            if parent is not None:
+                bone.parent = parent
+                bone.head = parent.tail
+                bone.use_connect = True
+
+        changed_count += 1
+
+    return changed_count
+
+
+def _resample_edit_bone_chains_to_curve(
+    path_candidates,
+    armature_obj,
+    edit_bones,
+    chains,
+    distribution_mode,
+    curvature_bias,
+):
+    changed_count = 0
+    skipped_count = 0
+
+    for chain in chains:
+        path_data = _best_path_for_edit_bone_chain(path_candidates, armature_obj, edit_bones, chain)
+        if path_data is None:
+            skipped_count += 1
+            continue
+
+        path_points, start_distance, end_distance = path_data
+        joints = _bone_joints_on_path(
+            path_points,
+            start_distance,
+            end_distance,
+            len(chain),
+            distribution_mode,
+            curvature_bias,
+        )
+        if len(joints) != len(chain) + 1:
+            skipped_count += 1
+            continue
+
+        changed_count += _set_edit_bone_chain_positions(armature_obj, edit_bones, chain, joints)
+
+    return changed_count, skipped_count
+
+
+def _edit_bone_chains_are_connected(edit_bones, chains):
+    for chain in chains:
+        for index in range(1, len(chain)):
+            parent = edit_bones.get(chain[index - 1])
+            bone = edit_bones.get(chain[index])
+            if parent is None or bone is None:
+                return False
+            if bone.parent != parent:
+                return False
+            if (bone.head - parent.tail).length > MIN_BONE_LENGTH:
+                return False
+
+    return True
+
+
+def _subdivide_edit_bone_chain(edit_bones, chain, cuts):
+    if cuts < 1:
+        return chain, 0
+
+    expanded_chain = []
+    added_count = 0
+
+    for name in chain:
+        bone = edit_bones.get(name)
+        if bone is None:
+            continue
+
+        expanded_chain.append(name)
+        for cut_index in range(cuts):
+            new_name = _unique_name(f"{name}_sub.{cut_index + 1:03d}", edit_bones.keys())
+            new_bone = edit_bones.new(new_name)
+            new_bone.head = bone.head.copy()
+            new_bone.tail = bone.tail.copy()
+            new_bone.roll = bone.roll
+            expanded_chain.append(new_bone.name)
+            added_count += 1
+
+    for index, name in enumerate(expanded_chain):
+        bone = edit_bones.get(name)
+        if bone is None:
+            continue
+
+        if index == 0:
+            bone.use_connect = False
+            continue
+
+        parent = edit_bones.get(expanded_chain[index - 1])
+        if parent is not None:
+            bone.parent = parent
+            bone.head = parent.tail
+            bone.use_connect = True
+
+    return expanded_chain, added_count
+
+
+def _select_edit_bone_chains(edit_bones, chains):
+    selected_set = {name for chain in chains for name in chain}
+    for bone in edit_bones:
+        selected = bone.name in selected_set
+        bone.select = selected
+        bone.select_head = selected
+        bone.select_tail = selected
 
 
 def _invert_edit_bone_chains(edit_bones, chains):
@@ -2850,7 +3049,7 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
 
     rig_bone_count: IntProperty(
         name="Bone Count",
-        description="Number of bones to generate. 0 follows the target node count",
+        description="Number of bones to generate. 0 follows the target segment range",
         default=0,
         min=0,
         max=256,
@@ -2861,23 +3060,50 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
         description="How the custom rigging tool chooses the curve segment",
         items=(
             ("END_TO_END", "End To End", "Generate bones from curve root to tip"),
-            ("FROM_ROOT", "From Root", "Generate bones from the root side of the selected node range"),
-            ("FROM_TIP", "From Tip", "Generate bones from the tip side of the selected node range"),
+            ("FROM_ROOT", "From Root", "Read segment range from root toward tip"),
+            ("FROM_TIP", "From Tip", "Read segment range from tip toward root"),
         ),
         default="END_TO_END",
     )
 
+    rig_distribution_mode: EnumProperty(
+        name="Distribution",
+        description="Distribution mode for generated or selected bone chains",
+        items=(
+            ("EVEN", "Evenly", "Space joints evenly along the visual path"),
+            ("CURVE", "Curve", "Space joints with extra density in curved areas"),
+        ),
+        default="EVEN",
+    )
+
+    rig_curvature_bias: FloatProperty(
+        name="Curvature Bias",
+        description="How strongly bone distribution concentrates joints in curved areas",
+        default=0.65,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
+
+    rig_subdivide_cuts: IntProperty(
+        name="Subdivide Cuts",
+        description="Number of new bones inserted into each selected bone",
+        default=1,
+        min=1,
+        max=16,
+    )
+
     rig_start_node: IntProperty(
-        name="Start Node",
-        description="1-based start node. 0 uses the first node",
+        name="Start Segment",
+        description="Direction-relative start segment boundary. 0 uses the fill start endpoint",
         default=0,
         min=0,
         max=10000,
     )
 
     rig_end_node: IntProperty(
-        name="End Node",
-        description="1-based end node. 0 uses the last node",
+        name="End Segment",
+        description="Direction-relative end segment boundary. 0 uses the fill end endpoint",
         default=0,
         min=0,
         max=10000,
@@ -2953,6 +3179,8 @@ class CTK_OT_generate_custom_bones_from_active_curve(bpy.types.Operator):
                 settings.rig_fill_mode,
                 settings.rig_start_node,
                 settings.rig_end_node,
+                settings.rig_distribution_mode,
+                settings.rig_curvature_bias,
             )
             if not chains:
                 self.report({"ERROR"}, "Active curve has no valid spline segment for custom bones.")
@@ -2966,6 +3194,190 @@ class CTK_OT_generate_custom_bones_from_active_curve(bpy.types.Operator):
         message = f"Created {bone_count} custom bones in {armature_obj.name}."
         if skipped_splines or skipped_segments:
             message += f" Skipped {skipped_splines} splines and {skipped_segments} segments."
+        self.report({"INFO"}, message)
+        return {"FINISHED"}
+
+
+class CTK_OT_apply_bone_distribution(bpy.types.Operator):
+    bl_idname = "curve_toolkit.apply_bone_distribution"
+    bl_label = "Apply Bone Distribution"
+    bl_description = "Resample selected armature bone chains onto the active drawn curve"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_curve(context) is not None and _active_or_selected_armature(context) is not None
+
+    def execute(self, context):
+        curve_obj = _active_curve(context)
+        armature_obj = _active_or_selected_armature(context)
+        if curve_obj is None:
+            self.report({"ERROR"}, "Active object must be a Curve.")
+            return {"CANCELLED"}
+        if armature_obj is None:
+            self.report({"ERROR"}, "Select an armature with selected bones.")
+            return {"CANCELLED"}
+
+        selected_names = _selected_bone_names(armature_obj)
+        if not selected_names:
+            self.report({"ERROR"}, "Select at least one armature bone.")
+            return {"CANCELLED"}
+
+        settings = context.scene.curve_toolkit
+        changed_count = 0
+        skipped_count = 0
+
+        try:
+            _mode_set_object(context)
+            path_candidates = _curve_path_candidates(context, curve_obj)
+            if not path_candidates:
+                self.report({"ERROR"}, "Active curve has no valid drawn path.")
+                return {"CANCELLED"}
+
+            context.view_layer.objects.active = armature_obj
+            armature_obj.select_set(True)
+            if armature_obj.mode != "EDIT":
+                bpy.ops.object.mode_set(mode="EDIT")
+
+            edit_bones = armature_obj.data.edit_bones
+            selected_names = [name for name in selected_names if edit_bones.get(name) is not None]
+            if not selected_names:
+                self.report({"ERROR"}, "Selected bones are no longer available in Edit Mode.")
+                return {"CANCELLED"}
+
+            chains = _selected_edit_bone_chains(edit_bones, selected_names)
+            if chains is None:
+                self.report({"ERROR"}, "Selected bones must be linear connected chains.")
+                return {"CANCELLED"}
+            if not _edit_bone_chains_are_connected(edit_bones, chains):
+                self.report({"ERROR"}, "Selected bones must be connected chains.")
+                return {"CANCELLED"}
+
+            changed_count, skipped_count = _resample_edit_bone_chains_to_curve(
+                path_candidates,
+                armature_obj,
+                edit_bones,
+                chains,
+                settings.rig_distribution_mode,
+                settings.rig_curvature_bias,
+            )
+            if changed_count == 0:
+                self.report({"ERROR"}, "Selected bones could not be matched to the active curve.")
+                return {"CANCELLED"}
+
+            _select_edit_bone_chains(edit_bones, chains)
+        finally:
+            if context.view_layer.objects.active == armature_obj and armature_obj.mode != "OBJECT":
+                bpy.ops.object.mode_set(mode="OBJECT")
+            curve_obj.select_set(True)
+            armature_obj.select_set(True)
+            context.view_layer.objects.active = curve_obj
+
+        message = f"Updated {changed_count} selected bones."
+        if skipped_count:
+            message += f" Skipped {skipped_count} chains."
+        self.report({"INFO"}, message)
+        return {"FINISHED"}
+
+
+class CTK_OT_subdivide_selected_bones(bpy.types.Operator):
+    bl_idname = "curve_toolkit.subdivide_selected_bones"
+    bl_label = "Subdivide Selected Bones"
+    bl_description = "Subdivide selected armature bone chains and resample them onto the active drawn curve"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_curve(context) is not None and _active_or_selected_armature(context) is not None
+
+    def execute(self, context):
+        curve_obj = _active_curve(context)
+        armature_obj = _active_or_selected_armature(context)
+        if curve_obj is None:
+            self.report({"ERROR"}, "Active object must be a Curve.")
+            return {"CANCELLED"}
+        if armature_obj is None:
+            self.report({"ERROR"}, "Select an armature with selected bones.")
+            return {"CANCELLED"}
+
+        selected_names = _selected_bone_names(armature_obj)
+        if not selected_names:
+            self.report({"ERROR"}, "Select at least one armature bone.")
+            return {"CANCELLED"}
+
+        settings = context.scene.curve_toolkit
+        added_count = 0
+        changed_count = 0
+        skipped_count = 0
+        expanded_chains = []
+
+        try:
+            _mode_set_object(context)
+            path_candidates = _curve_path_candidates(context, curve_obj)
+            if not path_candidates:
+                self.report({"ERROR"}, "Active curve has no valid drawn path.")
+                return {"CANCELLED"}
+
+            context.view_layer.objects.active = armature_obj
+            armature_obj.select_set(True)
+            if armature_obj.mode != "EDIT":
+                bpy.ops.object.mode_set(mode="EDIT")
+
+            edit_bones = armature_obj.data.edit_bones
+            selected_names = [name for name in selected_names if edit_bones.get(name) is not None]
+            if not selected_names:
+                self.report({"ERROR"}, "Selected bones are no longer available in Edit Mode.")
+                return {"CANCELLED"}
+
+            chains = _selected_edit_bone_chains(edit_bones, selected_names)
+            if chains is None:
+                self.report({"ERROR"}, "Selected bones must be linear connected chains.")
+                return {"CANCELLED"}
+            if not _edit_bone_chains_are_connected(edit_bones, chains):
+                self.report({"ERROR"}, "Selected bones must be connected chains.")
+                return {"CANCELLED"}
+
+            for chain in chains:
+                expanded_chain, chain_added_count = _subdivide_edit_bone_chain(
+                    edit_bones,
+                    chain,
+                    settings.rig_subdivide_cuts,
+                )
+                if len(expanded_chain) < 1:
+                    skipped_count += 1
+                    continue
+
+                expanded_chains.append(expanded_chain)
+                added_count += chain_added_count
+
+            if added_count == 0:
+                self.report({"ERROR"}, "No bones were added.")
+                return {"CANCELLED"}
+
+            changed_count, resample_skipped = _resample_edit_bone_chains_to_curve(
+                path_candidates,
+                armature_obj,
+                edit_bones,
+                expanded_chains,
+                settings.rig_distribution_mode,
+                settings.rig_curvature_bias,
+            )
+            skipped_count += resample_skipped
+            if changed_count == 0:
+                self.report({"ERROR"}, "Subdivided bones could not be matched to the active curve.")
+                return {"CANCELLED"}
+
+            _select_edit_bone_chains(edit_bones, expanded_chains)
+        finally:
+            if context.view_layer.objects.active == armature_obj and armature_obj.mode != "OBJECT":
+                bpy.ops.object.mode_set(mode="OBJECT")
+            curve_obj.select_set(True)
+            armature_obj.select_set(True)
+            context.view_layer.objects.active = curve_obj
+
+        message = f"Added {added_count} bones and updated {changed_count} selected bones."
+        if skipped_count:
+            message += f" Skipped {skipped_count} chains."
         self.report({"INFO"}, message)
         return {"FINISHED"}
 
@@ -4704,6 +5116,7 @@ class CTK_PT_tools(bpy.types.Panel):
         settings = context.scene.curve_toolkit
         curve_obj = _active_curve(context)
         armature_obj = _active_armature(context)
+        target_armature_obj = _active_or_selected_armature(context)
         twist_locked = curve_obj is not None and _custom_bool(curve_obj, "ctk_lock_twist", "hmt_lock_twist")
         root_locked = curve_obj is not None and _custom_bool(curve_obj, "ctk_lock_root", "hmt_lock_root")
         tip_locked = curve_obj is not None and _custom_bool(curve_obj, "ctk_lock_tip", "hmt_lock_tip")
@@ -4969,10 +5382,10 @@ class CTK_PT_tools(bpy.types.Panel):
             rigging_box.label(text="Custom Count")
             rigging_box.prop(settings, "rig_bone_count")
             rigging_box.prop(settings, "rig_fill_mode")
-            node_row = rigging_box.row(align=True)
-            node_row.enabled = settings.rig_fill_mode != "END_TO_END"
-            node_row.prop(settings, "rig_start_node")
-            node_row.prop(settings, "rig_end_node")
+            segment_row = rigging_box.row(align=True)
+            segment_row.enabled = settings.rig_fill_mode != "END_TO_END"
+            segment_row.prop(settings, "rig_start_node")
+            segment_row.prop(settings, "rig_end_node")
 
             custom_column = rigging_box.column(align=True)
             custom_column.enabled = curve_obj is not None
@@ -4981,6 +5394,21 @@ class CTK_PT_tools(bpy.types.Panel):
                 text="Generate Custom Count",
                 icon="ARMATURE_DATA",
             )
+
+            rigging_box.separator()
+            rigging_box.label(text="Bone Control")
+            rigging_box.prop(settings, "rig_distribution_mode")
+            bias_row = rigging_box.row(align=True)
+            bias_row.enabled = settings.rig_distribution_mode == "CURVE"
+            bias_row.prop(settings, "rig_curvature_bias", slider=True)
+
+            bone_control_column = rigging_box.column(align=True)
+            bone_control_column.enabled = curve_obj is not None and target_armature_obj is not None
+            bone_control_column.operator(CTK_OT_apply_bone_distribution.bl_idname)
+            rigging_box.prop(settings, "rig_subdivide_cuts")
+            bone_control_column = rigging_box.column(align=True)
+            bone_control_column.enabled = curve_obj is not None and target_armature_obj is not None
+            bone_control_column.operator(CTK_OT_subdivide_selected_bones.bl_idname)
 
             rigging_box.separator()
             rigging_box.label(text="Armature Tools")
@@ -5020,6 +5448,8 @@ classes = (
     CTK_OT_clear_hook_modifiers,
     CTK_OT_generate_bones_from_active_curve,
     CTK_OT_generate_custom_bones_from_active_curve,
+    CTK_OT_apply_bone_distribution,
+    CTK_OT_subdivide_selected_bones,
     CTK_OT_invert_selected_bones,
     CTK_OT_reset_path,
     CTK_OT_reset_path_x_axis,
