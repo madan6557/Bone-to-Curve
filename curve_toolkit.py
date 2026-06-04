@@ -35,6 +35,21 @@ _PREVIEW_UPDATE_RUNNING = False
 _PREVIEW_HANDLER_RUNNING = False
 
 
+def _remove_handler_by_name(handler_list, handler_name):
+    for handler in list(handler_list):
+        if getattr(handler, "__name__", "") == handler_name:
+            handler_list.remove(handler)
+
+
+def _remove_ctk_handlers():
+    _remove_handler_by_name(bpy.app.handlers.depsgraph_update_post, "_ctk_curve_lock_handler")
+    _remove_handler_by_name(bpy.app.handlers.depsgraph_update_post, "_ctk_preview_refresh_handler")
+    _remove_handler_by_name(bpy.app.handlers.save_pre, "_ctk_clear_preview_save_handler")
+
+
+_remove_ctk_handlers()
+
+
 def _unique_name(base_name, existing_names):
     if base_name not in existing_names:
         return base_name
@@ -6120,18 +6135,6 @@ classes = (
 )
 
 
-def _remove_handler_by_name(handler_list, handler_name):
-    for handler in list(handler_list):
-        if getattr(handler, "__name__", "") == handler_name:
-            handler_list.remove(handler)
-
-
-def _remove_ctk_handlers():
-    _remove_handler_by_name(bpy.app.handlers.depsgraph_update_post, "_ctk_curve_lock_handler")
-    _remove_handler_by_name(bpy.app.handlers.depsgraph_update_post, "_ctk_preview_refresh_handler")
-    _remove_handler_by_name(bpy.app.handlers.save_pre, "_ctk_clear_preview_save_handler")
-
-
 def register():
     _remove_ctk_handlers()
     for cls in classes:
@@ -6149,7 +6152,11 @@ def unregister():
         del bpy.types.Scene.curve_toolkit
     for cls in reversed(classes):
         if hasattr(cls, "bl_rna"):
-            bpy.utils.unregister_class(cls)
+            try:
+                bpy.utils.unregister_class(cls)
+            except RuntimeError as exc:
+                if "missing bl_rna attribute" not in str(exc):
+                    raise
 
 
 if __name__ == "__main__":
