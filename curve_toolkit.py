@@ -2244,7 +2244,7 @@ def _apply_endpoint_locks_to_curve(curve_obj):
 def _ctk_curve_lock_handler(_scene, _depsgraph):
     global _CURVE_LOCK_HANDLER_RUNNING
 
-    if _CURVE_LOCK_HANDLER_RUNNING or not _preview_objects_available():
+    if _CURVE_LOCK_HANDLER_RUNNING or not _bpy_data_objects_available():
         return
 
     _CURVE_LOCK_HANDLER_RUNNING = True
@@ -2870,12 +2870,12 @@ def _restore_view_state(context, state):
                 pass
 
 
-def _preview_objects_available():
+def _bpy_data_objects_available():
     return hasattr(bpy.data, "objects")
 
 
 def _clear_ctk_previews(kind=None):
-    if not _preview_objects_available():
+    if not _bpy_data_objects_available():
         return
 
     for obj in list(bpy.data.objects):
@@ -2895,7 +2895,7 @@ def _clear_ctk_previews(kind=None):
 
 
 def _has_ctk_preview(kind=None):
-    if not _preview_objects_available():
+    if not _bpy_data_objects_available():
         return False
 
     return any(
@@ -3263,7 +3263,7 @@ def _refresh_ctk_previews(context, force=False):
 
     if (
         _PREVIEW_UPDATE_RUNNING
-        or not _preview_objects_available()
+        or not _bpy_data_objects_available()
         or context is None
         or getattr(context.scene, "curve_toolkit", None) is None
     ):
@@ -3351,7 +3351,7 @@ def _update_bone_subdivide_preview(settings, context):
 def _ctk_preview_refresh_handler(_scene, _depsgraph):
     global _PREVIEW_HANDLER_RUNNING
 
-    if _PREVIEW_HANDLER_RUNNING:
+    if _PREVIEW_HANDLER_RUNNING or not _bpy_data_objects_available():
         return
 
     _PREVIEW_HANDLER_RUNNING = True
@@ -3363,6 +3363,9 @@ def _ctk_preview_refresh_handler(_scene, _depsgraph):
 
 @persistent
 def _ctk_clear_preview_save_handler(_dummy):
+    if not _bpy_data_objects_available():
+        return
+
     _clear_ctk_previews()
 
 
@@ -6146,7 +6149,6 @@ def register():
 
 
 def unregister():
-    _clear_ctk_previews()
     _remove_ctk_handlers()
     if hasattr(bpy.types.Scene, "curve_toolkit"):
         del bpy.types.Scene.curve_toolkit
