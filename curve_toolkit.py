@@ -25,10 +25,14 @@ MIN_BONE_LENGTH = 1.0e-6
 CTK_ENDPOINT_LOCKS_KEY = "ctk_endpoint_locks"
 CTK_TWIST_LOCKS_KEY = "ctk_twist_locks"
 CTK_LENGTHS_KEY = "ctk_stored_lengths"
+CTK_PREVIEW_KEY = "ctk_preview"
+CTK_PREVIEW_KIND_KEY = "ctk_preview_kind"
 LEGACY_ENDPOINT_LOCKS_KEY = "hmt_endpoint_locks"
 _CURVE_LOCK_HANDLER_RUNNING = False
 _RESOLUTION_BATCH_UPDATE_RUNNING = False
 _PROFILE_UPDATE_RUNNING = False
+_PREVIEW_UPDATE_RUNNING = False
+_PREVIEW_HANDLER_RUNNING = False
 
 
 def _unique_name(base_name, existing_names):
@@ -72,9 +76,15 @@ def _control_point_count(spline):
     return 0
 
 
+def _is_ctk_preview_object(obj):
+    return obj is not None and bool(obj.get(CTK_PREVIEW_KEY, False))
+
+
 def _active_curve(context):
     obj = context.view_layer.objects.active
     if obj is None:
+        return None
+    if _is_ctk_preview_object(obj):
         return None
     if obj.type != "CURVE":
         return None
@@ -84,6 +94,8 @@ def _active_curve(context):
 def _active_armature(context):
     obj = context.view_layer.objects.active
     if obj is None:
+        return None
+    if _is_ctk_preview_object(obj):
         return None
     if obj.type != "ARMATURE":
         return None
@@ -96,6 +108,8 @@ def _active_or_selected_armature(context):
         return active
 
     for obj in context.selected_objects:
+        if _is_ctk_preview_object(obj):
+            continue
         if obj.type == "ARMATURE":
             return obj
 
@@ -103,7 +117,7 @@ def _active_or_selected_armature(context):
 
 
 def _selected_curve_objects(context):
-    return [obj for obj in context.selected_objects if obj.type == "CURVE"]
+    return [obj for obj in context.selected_objects if obj.type == "CURVE" and not _is_ctk_preview_object(obj)]
 
 
 def _target_curve_objects(context):
@@ -118,7 +132,7 @@ def _target_or_scene_curve_objects(context):
     curves = _target_curve_objects(context)
     if curves:
         return curves
-    return [obj for obj in context.scene.objects if obj.type == "CURVE"]
+    return [obj for obj in context.scene.objects if obj.type == "CURVE" and not _is_ctk_preview_object(obj)]
 
 
 def _poll_mesh_object(_self, obj):
@@ -2221,6 +2235,8 @@ def _ctk_curve_lock_handler(_scene, _depsgraph):
     _CURVE_LOCK_HANDLER_RUNNING = True
     try:
         for obj in bpy.data.objects:
+            if _is_ctk_preview_object(obj):
+                continue
             if obj.type == "CURVE":
                 _apply_endpoint_locks_to_curve(obj)
                 _apply_twist_lock_to_curve(obj)
@@ -2812,6 +2828,514 @@ def _invert_edit_bone_chains(edit_bones, chains):
     return inverted_count
 
 
+def _capture_view_state(context):
+    active_obj = context.view_layer.objects.active
+    return active_obj, list(context.selected_objects), active_obj.mode if active_obj is not None else "OBJECT"
+
+
+def _restore_view_state(context, state):
+    active_obj, selected_objects, mode = state
+    current_active = context.view_layer.objects.active
+    if current_active is not None and current_active.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+    selected_names = {obj.name for obj in selected_objects if obj.name in bpy.data.objects}
+    for obj in context.view_layer.objects:
+        try:
+            obj.select_set(obj.name in selected_names)
+        except RuntimeError:
+            pass
+
+    if active_obj is not None and active_obj.name in bpy.data.objects:
+        context.view_layer.objects.active = active_obj
+        if mode != "OBJECT" and active_obj.mode != mode and mode in {"EDIT", "POSE"}:
+            try:
+                bpy.ops.object.mode_set(mode=mode)
+            except RuntimeError:
+                pass
+
+
+def _clear_ctk_previews(kind=None):
+    for obj in list(bpy.data.objects):
+        if not bool(obj.get(CTK_PREVIEW_KEY, False)):
+            continue
+        if kind is not None and obj.get(CTK_PREVIEW_KIND_KEY, "") != kind:
+            continue
+
+        data = obj.data
+        bpy.data.objects.remove(obj, do_unlink=True)
+        if data is None or data.users > 0:
+            continue
+        if isinstance(data, bpy.types.Curve):
+            bpy.data.curves.remove(data, do_unlink=True)
+        elif isinstance(data, bpy.types.Armature):
+            bpy.data.armatures.remove(data, do_unlink=True)
+
+
+def _has_ctk_preview(kind=None):
+    return any(
+        bool(obj.get(CTK_PREVIEW_KEY, False))
+        and (kind is None or obj.get(CTK_PREVIEW_KIND_KEY, "") == kind)
+        for obj in bpy.data.objects
+    )
+
+
+def _preview_collection(context, source_obj):
+    if source_obj is not None and source_obj.users_collection:
+        return source_obj.users_collection[0]
+    return context.collection
+
+
+def _create_preview_object(context, source_obj, data_copy, kind):
+    preview_name = _unique_name(f"CTK Preview {kind.title()} {source_obj.name}", bpy.data.objects.keys())
+    preview_obj = bpy.data.objects.new(preview_name, data_copy)
+    preview_obj.matrix_world = source_obj.matrix_world.copy()
+    preview_obj[CTK_PREVIEW_KEY] = True
+    preview_obj[CTK_PREVIEW_KIND_KEY] = kind
+    preview_obj.hide_render = True
+    preview_obj.hide_select = False
+    preview_obj.show_in_front = True
+    preview_obj.display_type = "WIRE"
+    preview_obj.color = (0.2, 0.7, 1.0, 0.45)
+    _preview_collection(context, source_obj).objects.link(preview_obj)
+    return preview_obj
+
+
+def _finish_preview_object(preview_obj):
+    preview_obj.hide_select = True
+    preview_obj.select_set(False)
+
+
+def _selected_point_signature(curve_obj):
+    data = []
+    for spline in curve_obj.data.splines:
+        if not _is_supported_spline(spline):
+            continue
+
+        points = list(_spline_points(spline))
+        selected_indices = [index for index, point in enumerate(points) if _point_is_selected(point, spline)]
+        selected_positions = [
+            tuple(round(value, 6) for value in _point_local_co(points[index], spline))
+            for index in selected_indices
+        ]
+        data.append((spline.type, len(points), selected_indices, selected_positions))
+
+    return data
+
+
+def _curve_shape_signature(curve_obj):
+    data = []
+    for spline in curve_obj.data.splines:
+        if not _is_supported_spline(spline):
+            continue
+
+        points = list(_spline_points(spline))
+        positions = [tuple(round(value, 6) for value in _point_local_co(point, spline)) for point in points]
+        data.append((spline.type, len(points), positions))
+
+    matrix = tuple(round(value, 6) for row in curve_obj.matrix_world for value in row)
+    return curve_obj.name, matrix, data
+
+
+def _selected_bone_signature(armature_obj):
+    selected_names = _selected_bone_names(armature_obj)
+    data = []
+
+    for name in selected_names:
+        bone = armature_obj.data.bones.get(name)
+        if bone is None:
+            continue
+
+        head = armature_obj.matrix_world @ bone.head_local
+        tail = armature_obj.matrix_world @ bone.tail_local
+        data.append(
+            (
+                name,
+                tuple(round(value, 6) for value in head),
+                tuple(round(value, 6) for value in tail),
+            )
+        )
+
+    return data
+
+
+def _preview_signature(payload):
+    return json.dumps(payload, sort_keys=True)
+
+
+def _segment_preview_signature(context, settings):
+    curve_obj = _active_curve(context)
+    if curve_obj is None:
+        return _preview_signature({"kind": "SEGMENT", "missing": True})
+
+    return _preview_signature(
+        {
+            "kind": "SEGMENT",
+            "object": curve_obj.name,
+            "operation": settings.segment_preview_operation,
+            "distribution": settings.distribution_mode,
+            "sub_distribution": settings.subdivide_distribution,
+            "bias": round(settings.curvature_bias, 6),
+            "cuts": settings.subdivide_cuts,
+            "selection": _selected_point_signature(curve_obj),
+        }
+    )
+
+
+def _bone_preview_signature(context, settings):
+    curve_obj = _active_curve(context)
+    armature_obj = _active_or_selected_armature(context)
+    if curve_obj is None or armature_obj is None:
+        return _preview_signature({"kind": "BONE", "missing": True})
+
+    return _preview_signature(
+        {
+            "kind": "BONE",
+            "curve": _curve_shape_signature(curve_obj),
+            "armature": armature_obj.name,
+            "operation": settings.bone_preview_operation,
+            "distribution": settings.rig_distribution_mode,
+            "bias": round(settings.rig_curvature_bias, 6),
+            "cuts": settings.rig_subdivide_cuts,
+            "selection": _selected_bone_signature(armature_obj),
+        }
+    )
+
+
+def _segment_has_valid_preview_selection(curve_obj):
+    splines = _editable_splines(curve_obj)
+    return any(len(run) >= 2 for spline in splines for run in _selected_index_runs(spline))
+
+
+def _preview_segment_distribution(context, preview_obj, settings):
+    splines = _editable_splines(preview_obj)
+    if not _segment_has_valid_preview_selection(preview_obj):
+        return 0
+
+    changed_count = 0
+    for spline in splines:
+        path_points = _evaluated_spline_path_points(context, preview_obj, spline)
+        for run in _segment_distribution_runs(spline, True):
+            changed_count += _apply_segment_distribution(
+                context,
+                preview_obj,
+                spline,
+                run,
+                settings.distribution_mode,
+                settings.curvature_bias,
+                path_points,
+            )
+
+    return changed_count
+
+
+def _preview_segment_subdivide(context, preview_obj, settings):
+    splines = _editable_splines(preview_obj)
+    if not _segment_has_valid_preview_selection(preview_obj):
+        return 0
+
+    before_counts = [_control_point_count(spline) for spline in splines]
+    path_snapshots = []
+
+    for spline_index, spline in enumerate(splines):
+        if not any(len(run) >= 2 for run in _selected_index_runs(spline)):
+            continue
+        path_points = []
+        if settings.subdivide_distribution != "NONE":
+            path_points = _evaluated_spline_path_points(context, preview_obj, spline)
+        path_snapshots.append((spline_index, path_points))
+
+    state = _capture_view_state(context)
+    try:
+        _set_active_only(context, preview_obj)
+        if preview_obj.mode != "EDIT":
+            bpy.ops.object.mode_set(mode="EDIT")
+        result = bpy.ops.curve.subdivide(number_cuts=settings.subdivide_cuts)
+        bpy.ops.object.mode_set(mode="OBJECT")
+        if "CANCELLED" in result:
+            return 0
+    finally:
+        _restore_view_state(context, state)
+
+    added_count = sum(
+        max(0, _control_point_count(preview_obj.data.splines[spline_index]) - before_count)
+        for spline_index, before_count in enumerate(before_counts)
+        if spline_index < len(preview_obj.data.splines)
+    )
+
+    if settings.subdivide_distribution != "NONE":
+        for spline_index, path_points in path_snapshots:
+            if spline_index >= len(preview_obj.data.splines):
+                continue
+            _apply_subdivide_distribution(
+                context,
+                preview_obj,
+                preview_obj.data.splines[spline_index],
+                settings.subdivide_distribution,
+                settings.curvature_bias,
+                path_points,
+            )
+
+    return added_count
+
+
+def _build_segment_preview(context, settings):
+    curve_obj = _active_curve(context)
+    if curve_obj is None or not _segment_has_valid_preview_selection(curve_obj):
+        return False
+
+    preview_obj = _create_preview_object(context, curve_obj, curve_obj.data.copy(), "SEGMENT")
+    changed_count = 0
+
+    if settings.segment_preview_operation == "SUBDIVIDE":
+        changed_count = _preview_segment_subdivide(context, preview_obj, settings)
+    else:
+        changed_count = _preview_segment_distribution(context, preview_obj, settings)
+
+    if changed_count == 0:
+        _clear_ctk_previews("SEGMENT")
+        return False
+
+    _finish_preview_object(preview_obj)
+    return True
+
+
+def _preview_bone_distribution(context, preview_obj, selected_names, settings):
+    curve_obj = _active_curve(context)
+    path_candidates = _curve_path_candidates(context, curve_obj)
+    if not path_candidates:
+        return 0, 0, []
+
+    state = _capture_view_state(context)
+    changed_count = 0
+    skipped_count = 0
+    chains = []
+
+    try:
+        context.view_layer.objects.active = preview_obj
+        preview_obj.select_set(True)
+        if preview_obj.mode != "EDIT":
+            bpy.ops.object.mode_set(mode="EDIT")
+
+        edit_bones = preview_obj.data.edit_bones
+        selected_names = [name for name in selected_names if edit_bones.get(name) is not None]
+        if not selected_names:
+            return 0, 0, []
+
+        chains = _selected_edit_bone_chains(edit_bones, selected_names)
+        if chains is None or not _edit_bone_chains_are_connected(edit_bones, chains):
+            return 0, 0, []
+
+        changed_count, skipped_count = _resample_edit_bone_chains_to_curve(
+            path_candidates,
+            preview_obj,
+            edit_bones,
+            chains,
+            settings.rig_distribution_mode,
+            settings.rig_curvature_bias,
+        )
+        _select_edit_bone_chains(edit_bones, chains)
+    finally:
+        _restore_view_state(context, state)
+
+    return changed_count, skipped_count, chains
+
+
+def _preview_bone_subdivide(context, preview_obj, selected_names, settings):
+    curve_obj = _active_curve(context)
+    path_candidates = _curve_path_candidates(context, curve_obj)
+    if not path_candidates:
+        return 0, 0, []
+
+    state = _capture_view_state(context)
+    added_count = 0
+    changed_count = 0
+    expanded_chains = []
+
+    try:
+        context.view_layer.objects.active = preview_obj
+        preview_obj.select_set(True)
+        if preview_obj.mode != "EDIT":
+            bpy.ops.object.mode_set(mode="EDIT")
+
+        edit_bones = preview_obj.data.edit_bones
+        selected_names = [name for name in selected_names if edit_bones.get(name) is not None]
+        if not selected_names:
+            return 0, 0, []
+
+        chains = _selected_edit_bone_chains(edit_bones, selected_names)
+        if chains is None or not _edit_bone_chains_are_connected(edit_bones, chains):
+            return 0, 0, []
+
+        for chain in chains:
+            expanded_chain, chain_added_count = _subdivide_edit_bone_chain(
+                edit_bones,
+                chain,
+                settings.rig_subdivide_cuts,
+            )
+            if expanded_chain:
+                expanded_chains.append(expanded_chain)
+                added_count += chain_added_count
+
+        if added_count == 0:
+            return 0, 0, []
+
+        changed_count, _skipped_count = _resample_edit_bone_chains_to_curve(
+            path_candidates,
+            preview_obj,
+            edit_bones,
+            expanded_chains,
+            settings.rig_distribution_mode,
+            settings.rig_curvature_bias,
+        )
+        _select_edit_bone_chains(edit_bones, expanded_chains)
+    finally:
+        _restore_view_state(context, state)
+
+    return added_count, changed_count, expanded_chains
+
+
+def _build_bone_preview(context, settings):
+    curve_obj = _active_curve(context)
+    armature_obj = _active_or_selected_armature(context)
+    if curve_obj is None or armature_obj is None:
+        return False
+
+    selected_names = _selected_bone_names(armature_obj)
+    if not selected_names:
+        return False
+
+    preview_obj = _create_preview_object(context, armature_obj, armature_obj.data.copy(), "BONE")
+    success = False
+
+    if settings.bone_preview_operation == "SUBDIVIDE":
+        added_count, changed_count, _chains = _preview_bone_subdivide(context, preview_obj, selected_names, settings)
+        success = added_count > 0 and changed_count > 0
+    else:
+        changed_count, _skipped_count, _chains = _preview_bone_distribution(context, preview_obj, selected_names, settings)
+        success = changed_count > 0
+
+    if not success:
+        _clear_ctk_previews("BONE")
+        return False
+
+    _finish_preview_object(preview_obj)
+    return True
+
+
+def _store_current_preview_signature(context, kind):
+    settings = getattr(context.scene, "curve_toolkit", None)
+    if settings is None:
+        return
+    if kind == "SEGMENT":
+        settings.segment_preview_signature = _segment_preview_signature(context, settings)
+    elif kind == "BONE":
+        settings.bone_preview_signature = _bone_preview_signature(context, settings)
+
+
+def _refresh_ctk_previews(context, force=False):
+    global _PREVIEW_UPDATE_RUNNING
+
+    if _PREVIEW_UPDATE_RUNNING or context is None or getattr(context.scene, "curve_toolkit", None) is None:
+        return
+
+    settings = context.scene.curve_toolkit
+    _PREVIEW_UPDATE_RUNNING = True
+    try:
+        if settings.segment_preview_enabled:
+            signature = _segment_preview_signature(context, settings)
+            if force or signature != settings.segment_preview_signature:
+                _clear_ctk_previews("SEGMENT")
+                _build_segment_preview(context, settings)
+                settings.segment_preview_signature = signature
+        else:
+            if settings.segment_preview_signature or _has_ctk_preview("SEGMENT"):
+                _clear_ctk_previews("SEGMENT")
+            settings.segment_preview_signature = ""
+
+        if settings.bone_preview_enabled:
+            signature = _bone_preview_signature(context, settings)
+            if force or signature != settings.bone_preview_signature:
+                _clear_ctk_previews("BONE")
+                _build_bone_preview(context, settings)
+                settings.bone_preview_signature = signature
+        else:
+            if settings.bone_preview_signature or _has_ctk_preview("BONE"):
+                _clear_ctk_previews("BONE")
+            settings.bone_preview_signature = ""
+    finally:
+        _PREVIEW_UPDATE_RUNNING = False
+
+
+def _set_segment_preview_operation(settings, operation):
+    if settings.segment_preview_operation != operation:
+        settings.segment_preview_operation = operation
+
+
+def _set_bone_preview_operation(settings, operation):
+    if settings.bone_preview_operation != operation:
+        settings.bone_preview_operation = operation
+
+
+def _update_segment_preview_enabled(settings, context):
+    if not settings.segment_preview_enabled:
+        _clear_ctk_previews("SEGMENT")
+        settings.segment_preview_signature = ""
+        return
+    _refresh_ctk_previews(context, force=True)
+
+
+def _update_bone_preview_enabled(settings, context):
+    if not settings.bone_preview_enabled:
+        _clear_ctk_previews("BONE")
+        settings.bone_preview_signature = ""
+        return
+    _refresh_ctk_previews(context, force=True)
+
+
+def _update_segment_distribution_preview(settings, context):
+    _set_segment_preview_operation(settings, "DISTRIBUTE")
+    _refresh_ctk_previews(context)
+
+
+def _update_segment_subdivide_preview(settings, context):
+    _set_segment_preview_operation(settings, "SUBDIVIDE")
+    _refresh_ctk_previews(context)
+
+
+def _update_preview_settings(settings, context):
+    _refresh_ctk_previews(context)
+
+
+def _update_bone_distribution_preview(settings, context):
+    _set_bone_preview_operation(settings, "DISTRIBUTE")
+    _refresh_ctk_previews(context)
+
+
+def _update_bone_subdivide_preview(settings, context):
+    _set_bone_preview_operation(settings, "SUBDIVIDE")
+    _refresh_ctk_previews(context)
+
+
+@persistent
+def _ctk_preview_refresh_handler(_scene, _depsgraph):
+    global _PREVIEW_HANDLER_RUNNING
+
+    if _PREVIEW_HANDLER_RUNNING:
+        return
+
+    _PREVIEW_HANDLER_RUNNING = True
+    try:
+        _refresh_ctk_previews(bpy.context)
+    finally:
+        _PREVIEW_HANDLER_RUNNING = False
+
+
+@persistent
+def _ctk_clear_preview_save_handler(_dummy):
+    _clear_ctk_previews()
+
+
 class CTK_PG_resolution_collection_item(bpy.types.PropertyGroup):
     collection: PointerProperty(
         name="Collection",
@@ -2836,6 +3360,7 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
     show_validation_tools: BoolProperty(name="Validation", default=True)
     show_mirror: BoolProperty(name="Mirror", default=True)
     show_convert_tools: BoolProperty(name="Convert / Bridge", default=True)
+    show_bone_control: BoolProperty(name="Bone Control", default=True)
     show_rigging: BoolProperty(name="Rigging", default=True)
 
     smooth_factor: FloatProperty(
@@ -2862,6 +3387,7 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
         min=0.0,
         max=1.0,
         subtype="FACTOR",
+        update=_update_preview_settings,
     )
 
     distribution_mode: EnumProperty(
@@ -2872,6 +3398,7 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
             ("CURVE", "Curve", "Space points with extra density in curved areas"),
         ),
         default="EVEN",
+        update=_update_segment_distribution_preview,
     )
 
     subdivide_distribution: EnumProperty(
@@ -2883,6 +3410,7 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
             ("CURVE", "Curve", "Redistribute subdivided points with extra density in curved areas"),
         ),
         default="NONE",
+        update=_update_segment_subdivide_preview,
     )
 
     subdivide_cuts: IntProperty(
@@ -2891,6 +3419,28 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
         default=1,
         min=1,
         max=16,
+        update=_update_segment_subdivide_preview,
+    )
+
+    segment_preview_enabled: BoolProperty(
+        name="Preview",
+        description="Show a non-destructive Segment Control ghost preview for selected points",
+        default=False,
+        update=_update_segment_preview_enabled,
+    )
+
+    segment_preview_operation: StringProperty(
+        name="Segment Preview Operation",
+        description="Internal Segment Control preview operation",
+        default="DISTRIBUTE",
+        options={"HIDDEN"},
+    )
+
+    segment_preview_signature: StringProperty(
+        name="Segment Preview Signature",
+        description="Internal Segment Control preview cache key",
+        default="",
+        options={"HIDDEN"},
     )
 
     auto_subdivide_factor: FloatProperty(
@@ -3074,6 +3624,7 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
             ("CURVE", "Curve", "Space joints with extra density in curved areas"),
         ),
         default="EVEN",
+        update=_update_bone_distribution_preview,
     )
 
     rig_curvature_bias: FloatProperty(
@@ -3083,6 +3634,7 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
         min=0.0,
         max=1.0,
         subtype="FACTOR",
+        update=_update_preview_settings,
     )
 
     rig_subdivide_cuts: IntProperty(
@@ -3091,6 +3643,28 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
         default=1,
         min=1,
         max=16,
+        update=_update_bone_subdivide_preview,
+    )
+
+    bone_preview_enabled: BoolProperty(
+        name="Preview",
+        description="Show a non-destructive Bone Control ghost preview for selected bone chains",
+        default=False,
+        update=_update_bone_preview_enabled,
+    )
+
+    bone_preview_operation: StringProperty(
+        name="Bone Preview Operation",
+        description="Internal Bone Control preview operation",
+        default="DISTRIBUTE",
+        options={"HIDDEN"},
+    )
+
+    bone_preview_signature: StringProperty(
+        name="Bone Preview Signature",
+        description="Internal Bone Control preview cache key",
+        default="",
+        options={"HIDDEN"},
     )
 
     rig_start_node: IntProperty(
@@ -3276,6 +3850,8 @@ class CTK_OT_apply_bone_distribution(bpy.types.Operator):
         message = f"Updated {changed_count} selected bones."
         if skipped_count:
             message += f" Skipped {skipped_count} chains."
+        _clear_ctk_previews("BONE")
+        _store_current_preview_signature(context, "BONE")
         self.report({"INFO"}, message)
         return {"FINISHED"}
 
@@ -3378,7 +3954,38 @@ class CTK_OT_subdivide_selected_bones(bpy.types.Operator):
         message = f"Added {added_count} bones and updated {changed_count} selected bones."
         if skipped_count:
             message += f" Skipped {skipped_count} chains."
+        _clear_ctk_previews("BONE")
+        _store_current_preview_signature(context, "BONE")
         self.report({"INFO"}, message)
+        return {"FINISHED"}
+
+
+class CTK_OT_clear_preview(bpy.types.Operator):
+    bl_idname = "curve_toolkit.clear_preview"
+    bl_label = "Clear Preview"
+    bl_description = "Clear Curve Toolkit ghost preview objects"
+    bl_options = {"REGISTER", "UNDO"}
+
+    kind: bpy.props.EnumProperty(
+        name="Preview",
+        items=(
+            ("SEGMENT", "Segment", "Clear Segment Control preview"),
+            ("BONE", "Bone", "Clear Bone Control preview"),
+            ("ALL", "All", "Clear all Curve Toolkit previews"),
+        ),
+        default="ALL",
+    )
+
+    def execute(self, context):
+        if self.kind == "ALL":
+            _clear_ctk_previews()
+            _store_current_preview_signature(context, "SEGMENT")
+            _store_current_preview_signature(context, "BONE")
+        else:
+            _clear_ctk_previews(self.kind)
+            _store_current_preview_signature(context, self.kind)
+
+        self.report({"INFO"}, "Cleared preview.")
         return {"FINISHED"}
 
 
@@ -3616,11 +4223,15 @@ class CTK_OT_segment_distribute(bpy.types.Operator):
 
         settings = context.scene.curve_toolkit
         selected_mode = _has_selected_points(splines)
+        if self.mode != "FIT" and not selected_mode:
+            self.report({"ERROR"}, "Select at least 2 contiguous curve points to distribute.")
+            return {"CANCELLED"}
+
         changed_count = 0
 
         for spline in splines:
             path_points = _evaluated_spline_path_points(context, curve_obj, spline)
-            for run in _segment_distribution_runs(spline, selected_mode):
+            for run in _segment_distribution_runs(spline, selected_mode if self.mode == "FIT" else True):
                 changed_count += _apply_segment_distribution(
                     context,
                     curve_obj,
@@ -3636,6 +4247,9 @@ class CTK_OT_segment_distribute(bpy.types.Operator):
             return {"CANCELLED"}
 
         context.view_layer.update()
+        if self.mode != "FIT":
+            _clear_ctk_previews("SEGMENT")
+            _store_current_preview_signature(context, "SEGMENT")
         label = "fit to visual path" if self.mode == "FIT" else self.mode.lower()
         self.report({"INFO"}, f"Updated {changed_count} curve points with {label}.")
         return {"FINISHED"}
@@ -3726,6 +4340,8 @@ class CTK_OT_segment_subdivide_selected(bpy.types.Operator):
         if previous_mode != "OBJECT":
             bpy.ops.object.mode_set(mode=previous_mode)
 
+        _clear_ctk_previews("SEGMENT")
+        _store_current_preview_signature(context, "SEGMENT")
         self.report({"INFO"}, f"Added {added_count} curve points.")
         return {"FINISHED"}
 
@@ -5162,6 +5778,12 @@ class CTK_PT_tools(bpy.types.Panel):
             segment_column = segment_box.column(align=False)
             segment_column.enabled = curve_obj is not None
 
+            row = segment_column.row(align=True)
+            row.prop(settings, "segment_preview_enabled")
+            op = row.operator(CTK_OT_clear_preview.bl_idname, text="Clear Preview")
+            op.kind = "SEGMENT"
+
+            segment_column.separator()
             segment_column.label(text="Raw Distribution")
             segment_column.prop(settings, "distribution_mode")
             bias_row = segment_column.row(align=True)
@@ -5367,6 +5989,26 @@ class CTK_PT_tools(bpy.types.Panel):
             convert_box.operator(CTK_OT_convert_curves_to_mesh.bl_idname)
             convert_box.operator(CTK_OT_convert_curves_object_to_curve.bl_idname)
 
+        bone_control_box = layout.box()
+        if self._draw_foldout(bone_control_box, settings, "show_bone_control", "Bone Control", "ARMATURE_DATA"):
+            row = bone_control_box.row(align=True)
+            row.prop(settings, "bone_preview_enabled")
+            op = row.operator(CTK_OT_clear_preview.bl_idname, text="Clear Preview")
+            op.kind = "BONE"
+
+            bone_control_box.prop(settings, "rig_distribution_mode")
+            bias_row = bone_control_box.row(align=True)
+            bias_row.enabled = settings.rig_distribution_mode == "CURVE"
+            bias_row.prop(settings, "rig_curvature_bias", slider=True)
+
+            bone_control_column = bone_control_box.column(align=True)
+            bone_control_column.enabled = curve_obj is not None and target_armature_obj is not None
+            bone_control_column.operator(CTK_OT_apply_bone_distribution.bl_idname)
+            bone_control_box.prop(settings, "rig_subdivide_cuts")
+            bone_control_column = bone_control_box.column(align=True)
+            bone_control_column.enabled = curve_obj is not None and target_armature_obj is not None
+            bone_control_column.operator(CTK_OT_subdivide_selected_bones.bl_idname)
+
         rigging_box = layout.box()
         if self._draw_foldout(rigging_box, settings, "show_rigging", "Rigging", "ARMATURE_DATA"):
             rigging_box.label(text="From Control Points")
@@ -5394,21 +6036,6 @@ class CTK_PT_tools(bpy.types.Panel):
                 text="Generate Custom Count",
                 icon="ARMATURE_DATA",
             )
-
-            rigging_box.separator()
-            rigging_box.label(text="Bone Control")
-            rigging_box.prop(settings, "rig_distribution_mode")
-            bias_row = rigging_box.row(align=True)
-            bias_row.enabled = settings.rig_distribution_mode == "CURVE"
-            bias_row.prop(settings, "rig_curvature_bias", slider=True)
-
-            bone_control_column = rigging_box.column(align=True)
-            bone_control_column.enabled = curve_obj is not None and target_armature_obj is not None
-            bone_control_column.operator(CTK_OT_apply_bone_distribution.bl_idname)
-            rigging_box.prop(settings, "rig_subdivide_cuts")
-            bone_control_column = rigging_box.column(align=True)
-            bone_control_column.enabled = curve_obj is not None and target_armature_obj is not None
-            bone_control_column.operator(CTK_OT_subdivide_selected_bones.bl_idname)
 
             rigging_box.separator()
             rigging_box.label(text="Armature Tools")
@@ -5450,6 +6077,7 @@ classes = (
     CTK_OT_generate_custom_bones_from_active_curve,
     CTK_OT_apply_bone_distribution,
     CTK_OT_subdivide_selected_bones,
+    CTK_OT_clear_preview,
     CTK_OT_invert_selected_bones,
     CTK_OT_reset_path,
     CTK_OT_reset_path_x_axis,
@@ -5478,16 +6106,26 @@ classes = (
 
 
 def register():
+    _clear_ctk_previews()
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.curve_toolkit = PointerProperty(type=CTK_PG_settings)
     if _ctk_curve_lock_handler not in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.append(_ctk_curve_lock_handler)
+    if _ctk_preview_refresh_handler not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(_ctk_preview_refresh_handler)
+    if _ctk_clear_preview_save_handler not in bpy.app.handlers.save_pre:
+        bpy.app.handlers.save_pre.append(_ctk_clear_preview_save_handler)
 
 
 def unregister():
+    _clear_ctk_previews()
     if _ctk_curve_lock_handler in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(_ctk_curve_lock_handler)
+    if _ctk_preview_refresh_handler in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(_ctk_preview_refresh_handler)
+    if _ctk_clear_preview_save_handler in bpy.app.handlers.save_pre:
+        bpy.app.handlers.save_pre.remove(_ctk_clear_preview_save_handler)
     if hasattr(bpy.types.Scene, "curve_toolkit"):
         del bpy.types.Scene.curve_toolkit
     for cls in reversed(classes):

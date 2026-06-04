@@ -31,6 +31,8 @@ Closed curve splines are protected from destructive edit operations.
 
 ## Segment Control
 
+`Preview` shows a temporary ghost curve for selected points only. It does not change the original curve until an apply button is pressed. `Clear Preview` removes the ghost preview.
+
 Raw Distribution:
 
 - `Distribution`: chooses `Evenly` or `Curve`.
@@ -52,7 +54,7 @@ Fit:
 
 - `Fit To Visual Path`: moves the control path closer to the current evaluated visual path without changing point count.
 
-Distribution and fit tools use selected contiguous point ranges when points are selected. If no points are selected, they process the whole open spline. Distribution modes preserve radius and twist profiles while moving control point placement along the current evaluated path. `Subdivide Selected` requires at least 2 contiguous selected points. `None` sub distribution keeps Blender's conventional subdivision. `Evenly` and `Curve` sub distribution redistribute the selected subdivided range after cuts are inserted. `Auto Subdivide` uses integrated curvature so low-curvature intervals receive few cuts or no cuts. `Fit To Visual Path` is separate because it intentionally projects controls to their current evaluated positions and can change shape. Segment Control keeps object transforms, bevel references, caps, and materials stable.
+Distribution preview and apply require at least 2 contiguous selected points. `Subdivide Selected` also requires at least 2 contiguous selected points. `None` sub distribution keeps Blender's conventional subdivision. `Evenly` and `Curve` sub distribution redistribute the selected subdivided range after cuts are inserted. `Auto Subdivide` uses integrated curvature so low-curvature intervals receive few cuts or no cuts. `Fit To Visual Path` remains separate and can still process the whole open spline when no points are selected because it intentionally projects controls to their current evaluated positions and can change shape. Segment Control keeps object transforms, bevel references, caps, and materials stable.
 
 ## Smooth / Reset
 
@@ -141,6 +143,20 @@ Caps buttons show the current cap state in the panel.
 - `Export Mesh Copy`: creates evaluated mesh copies of selected curves in a separate collection without deleting or converting the originals.
 - `Curves Object to Curve`: converts an active Blender Curves object into a legacy Curve object so the toolkit can edit it.
 
+## Bone Control
+
+`Bone Control` applies the same visual path sampling to existing armatures. Keep the curve as the active object, select the target armature too, and select a linear connected bone chain before running these tools.
+
+- `Preview`: shows a temporary ghost armature for the selected bone chain. It does not change the original armature until an apply button is pressed.
+- `Clear Preview`: removes the ghost bone preview.
+- `Distribution`: chooses `Evenly` or `Curve` for generated custom bones and selected bone chains.
+- `Curvature Bias`: controls how strongly `Curve` distribution concentrates joints in curved areas.
+- `Apply Bone Distribution`: repositions the selected bone chain onto the active drawn curve without adding bones.
+- `Subdivide Cuts`: controls how many new bones are inserted into each selected bone.
+- `Subdivide Selected Bones`: subdivides the selected chain, then resamples the result onto the active drawn curve immediately.
+
+Preview is off by default so normal selection or transform work does not create any automatic visual changes. When preview is enabled, selection and setting changes rebuild only the ghost object. Pressing an apply button commits the current result to the original object and clears the ghost.
+
 ## Rigging
 
 `Generate Bones From Active Curve` creates a new armature in the same collection as the curve. Each spline with at least two usable control points becomes one connected bone chain.
@@ -160,13 +176,7 @@ In the panel this is shown under `Custom Count` with the `Generate Custom Count`
 - Example: `From Tip` with `Start Segment` 0, `End Segment` 3, and `Bone Count` 0 creates 3 bones starting from the tip toward the root.
 - If `Bone Count` is greater than 0, the selected range stays the same and is resampled to that exact bone count.
 
-`Bone Control` applies the same visual path sampling to existing armatures. Keep the curve as the active object, select the target armature too, and select a linear connected bone chain before running these tools.
-
-- `Distribution`: chooses `Evenly` or `Curve` for generated custom bones and selected bone chains.
-- `Curvature Bias`: controls how strongly `Curve` distribution concentrates joints in curved areas.
-- `Apply Bone Distribution`: repositions the selected bone chain onto the active drawn curve without adding bones.
-- `Subdivide Cuts`: controls how many new bones are inserted into each selected bone.
-- `Subdivide Selected Bones`: subdivides the selected chain, then resamples the result onto the active drawn curve immediately.
+`Generate Custom Count` uses the `Distribution` and `Curvature Bias` values from Bone Control.
 
 `Invert Selected Bones` reverses selected armature bones and flips connected parent order. It is available when the active object is an armature.
 
