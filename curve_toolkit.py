@@ -4,7 +4,7 @@
 bl_info = {
     "name": "Curve Toolkit",
     "author": "madan6557",
-    "version": (1, 8, 0),
+    "version": (1, 9, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Curve Toolkit",
     "description": "Curve modeling tools and bone chain generation.",
@@ -937,6 +937,44 @@ def _point_at_distance(points, distance):
     return points[-1]
 
 
+def _path_cumulative_distances(points):
+    cumulative = [0.0]
+    for index in range(len(points) - 1):
+        cumulative.append(cumulative[-1] + (points[index + 1] - points[index]).length)
+    return cumulative
+
+
+def _path_vertex_curvatures(path_points):
+    curvatures = [0.0] * len(path_points)
+
+    for index in range(1, len(path_points) - 1):
+        first = path_points[index] - path_points[index - 1]
+        second = path_points[index + 1] - path_points[index]
+        if first.length <= MIN_BONE_LENGTH or second.length <= MIN_BONE_LENGTH:
+            continue
+
+        local_length = max(MIN_BONE_LENGTH, (first.length + second.length) * 0.5)
+        curvatures[index] = first.angle(second, 0.0) / local_length
+
+    if len(path_points) > 2:
+        curvatures[0] = curvatures[1]
+        curvatures[-1] = curvatures[-2]
+
+    return curvatures
+
+
+def _path_smoothed_curvatures(path_points):
+    curvatures = _path_vertex_curvatures(path_points)
+    smoothed = list(curvatures)
+    for index in range(1, len(curvatures) - 1):
+        smoothed[index] = (
+            curvatures[index - 1] * 0.25
+            + curvatures[index] * 0.5
+            + curvatures[index + 1] * 0.25
+        )
+    return smoothed
+
+
 def _resample_path_by_bone_count(path_points, bone_count):
     total_length = _polyline_length(path_points)
     if total_length <= MIN_BONE_LENGTH:
@@ -1064,30 +1102,6 @@ def _control_distances_on_path(curve_obj, spline, indices, path_points):
     ]
 
 
-def _ordered_control_distances_on_path(curve_obj, spline, indices, path_points):
-    total_path_length = _polyline_length(path_points)
-    point_count = _control_point_count(spline)
-    points = list(_spline_points(spline))
-    if total_path_length <= MIN_BONE_LENGTH or point_count < 2:
-        return []
-
-    control_distances = [0.0]
-    for index in range(point_count - 1):
-        start = _point_world_co(curve_obj, spline, points[index])
-        end = _point_world_co(curve_obj, spline, points[index + 1])
-        control_distances.append(control_distances[-1] + (end - start).length)
-
-    total_control_length = control_distances[-1]
-    if total_control_length <= MIN_BONE_LENGTH:
-        return [_fallback_node_distance(total_path_length, point_count, index) for index in indices]
-
-    distances = [
-        control_distances[index] / total_control_length * total_path_length
-        for index in indices
-    ]
-    return _monotonic_distances(distances, total_path_length)
-
-
 def _sample_scalar_by_distance(source_distances, values, target_distance):
     if not source_distances or not values:
         return 0.0
@@ -1128,13 +1142,16 @@ def _path_weighted_distances(path_points, start_distance, end_distance, point_co
             for index in range(point_count)
         ]
 
-    cumulative = [0.0]
-    for index in range(len(path_points) - 1):
-        cumulative.append(cumulative[-1] + (path_points[index + 1] - path_points[index]).length)
+    cumulative = _path_cumulative_distances(path_points)
+    smoothed_curvatures = _path_smoothed_curvatures(path_points)
+    max_curvature = max(smoothed_curvatures)
+    if max_curvature <= MIN_BONE_LENGTH:
+        return [
+            start_distance + (end_distance - start_distance) * index / (point_count - 1)
+            for index in range(point_count)
+        ]
 
     segment_entries = []
-    max_turn = 0.0
-
     for index in range(len(path_points) - 1):
         segment_start = cumulative[index]
         segment_end = cumulative[index + 1]
@@ -1143,26 +1160,17 @@ def _path_weighted_distances(path_points, start_distance, end_distance, point_co
         if overlap_end - overlap_start <= MIN_BONE_LENGTH:
             continue
 
-        turn = 0.0
-        for vertex_index in (index, index + 1):
-            if vertex_index <= 0 or vertex_index >= len(path_points) - 1:
-                continue
-            first = path_points[vertex_index] - path_points[vertex_index - 1]
-            second = path_points[vertex_index + 1] - path_points[vertex_index]
-            if first.length <= MIN_BONE_LENGTH or second.length <= MIN_BONE_LENGTH:
-                continue
-            turn = max(turn, first.angle(second, 0.0))
-
-        max_turn = max(max_turn, turn)
-        segment_entries.append((overlap_start, overlap_end, turn))
+        curvature = max(smoothed_curvatures[index], smoothed_curvatures[index + 1])
+        segment_entries.append((overlap_start, overlap_end, curvature))
 
     if not segment_entries:
         return []
 
     weighted_cumulative = [0.0]
-    for overlap_start, overlap_end, turn in segment_entries:
-        normalized_turn = turn / max_turn if max_turn > MIN_BONE_LENGTH else 0.0
-        weight = 1.0 + normalized_turn * bias * 4.0
+    for overlap_start, overlap_end, curvature in segment_entries:
+        normalized_curvature = max(0.0, min(1.0, curvature / max_curvature))
+        density = pow(normalized_curvature, 1.35)
+        weight = 1.0 + density * bias * 8.0
         weighted_cumulative.append(weighted_cumulative[-1] + (overlap_end - overlap_start) * weight)
 
     weighted_total = weighted_cumulative[-1]
@@ -1184,6 +1192,133 @@ def _path_weighted_distances(path_points, start_distance, end_distance, point_co
             break
 
     return distances
+
+
+def _nurbs_knot_vector(point_count, degree, use_endpoint):
+    if point_count < 2 or degree < 1 or degree >= point_count or not use_endpoint:
+        return None
+
+    span_count = point_count - degree
+    if span_count < 1:
+        return None
+
+    knots = [0.0] * (degree + 1)
+    for index in range(1, point_count - degree):
+        knots.append(index / span_count)
+    knots.extend([1.0] * (degree + 1))
+    return knots
+
+
+def _bspline_basis_values(point_count, degree, knots, parameter):
+    parameter = max(0.0, min(1.0, float(parameter)))
+    if parameter >= 1.0:
+        values = [0.0] * point_count
+        values[-1] = 1.0
+        return values
+
+    values = [0.0] * point_count
+    for index in range(point_count):
+        if knots[index] <= parameter < knots[index + 1]:
+            values[index] = 1.0
+
+    for current_degree in range(1, degree + 1):
+        next_values = [0.0] * point_count
+        for index in range(point_count):
+            left = 0.0
+            left_denominator = knots[index + current_degree] - knots[index]
+            if left_denominator > MIN_BONE_LENGTH:
+                left = (parameter - knots[index]) / left_denominator * values[index]
+
+            right = 0.0
+            if index + 1 < point_count:
+                right_denominator = knots[index + current_degree + 1] - knots[index + 1]
+                if right_denominator > MIN_BONE_LENGTH:
+                    right = (knots[index + current_degree + 1] - parameter) / right_denominator * values[index + 1]
+
+            next_values[index] = left + right
+        values = next_values
+
+    return values
+
+
+def _rational_nurbs_basis_values(point_count, degree, knots, weights, parameter):
+    values = _bspline_basis_values(point_count, degree, knots, parameter)
+    weighted = [value * weight for value, weight in zip(values, weights)]
+    total = sum(weighted)
+    if total <= MIN_BONE_LENGTH:
+        return values
+    return [value / total for value in weighted]
+
+
+def _solve_vector_linear_system(matrix_rows, targets):
+    size = len(matrix_rows)
+    if size == 0 or len(targets) != size:
+        return None
+
+    matrix = [list(row) for row in matrix_rows]
+    values = [[target.x, target.y, target.z] for target in targets]
+
+    for pivot_index in range(size):
+        pivot_row = max(range(pivot_index, size), key=lambda row_index: abs(matrix[row_index][pivot_index]))
+        if abs(matrix[pivot_row][pivot_index]) <= 1.0e-10:
+            return None
+
+        if pivot_row != pivot_index:
+            matrix[pivot_index], matrix[pivot_row] = matrix[pivot_row], matrix[pivot_index]
+            values[pivot_index], values[pivot_row] = values[pivot_row], values[pivot_index]
+
+        pivot = matrix[pivot_index][pivot_index]
+        for column in range(pivot_index, size):
+            matrix[pivot_index][column] /= pivot
+        for axis in range(3):
+            values[pivot_index][axis] /= pivot
+
+        for row_index in range(size):
+            if row_index == pivot_index:
+                continue
+
+            factor = matrix[row_index][pivot_index]
+            if abs(factor) <= 1.0e-12:
+                continue
+
+            for column in range(pivot_index, size):
+                matrix[row_index][column] -= factor * matrix[pivot_index][column]
+            for axis in range(3):
+                values[row_index][axis] -= factor * values[pivot_index][axis]
+
+    return [Vector(value) for value in values]
+
+
+def _apply_nurbs_interpolated_positions(curve_obj, spline, indices, target_positions):
+    point_count = _control_point_count(spline)
+    if spline.type != "NURBS" or len(indices) != point_count or indices != list(range(point_count)):
+        return False
+    if point_count > 12:
+        return False
+    if len(target_positions) != point_count:
+        return False
+
+    order = max(2, min(int(getattr(spline, "order_u", 2)), point_count))
+    degree = order - 1
+    knots = _nurbs_knot_vector(point_count, degree, bool(getattr(spline, "use_endpoint_u", False)))
+    if knots is None:
+        return False
+
+    points = list(spline.points)
+    weights = [max(MIN_BONE_LENGTH, float(point.co[3])) for point in points]
+    matrix_rows = []
+    for index in range(point_count):
+        parameter = index / (point_count - 1)
+        matrix_rows.append(_rational_nurbs_basis_values(point_count, degree, knots, weights, parameter))
+
+    solved_positions = _solve_vector_linear_system(matrix_rows, target_positions)
+    if solved_positions is None:
+        return False
+
+    for point, world_position in zip(points, solved_positions):
+        _move_point_to_world(curve_obj, spline, point, world_position)
+
+    return True
 
 
 def _segment_distribution_distances(path_points, source_distances, point_count, mode, curvature_bias):
@@ -1213,10 +1348,7 @@ def _distribution_path_for_indices(context, curve_obj, spline, indices, mode, pa
         points = list(_spline_points(spline))
         path_points = [_point_world_co(curve_obj, spline, points[index]) for index in indices]
 
-    if mode == "FIT":
-        source_distances = _control_distances_on_path(curve_obj, spline, indices, path_points)
-    else:
-        source_distances = _ordered_control_distances_on_path(curve_obj, spline, indices, path_points)
+    source_distances = _control_distances_on_path(curve_obj, spline, indices, path_points)
     return path_points, source_distances
 
 
@@ -1252,10 +1384,17 @@ def _apply_segment_distribution(context, curve_obj, spline, indices, mode, curva
 
     radii = [_point_radius(points[index]) for index in indices]
     tilts = [_point_tilt(points[index]) for index in indices]
+    target_positions = [_point_at_distance(path_points, target_distance) for target_distance in target_distances]
+
+    if mode != "FIT" and _apply_nurbs_interpolated_positions(curve_obj, spline, indices, target_positions):
+        pass
+    else:
+        for index, target_position in zip(indices, target_positions):
+            point = points[index]
+            _move_point_to_world(curve_obj, spline, point, target_position)
 
     for index, target_distance in zip(indices, target_distances):
         point = points[index]
-        _move_point_to_world(curve_obj, spline, point, _point_at_distance(path_points, target_distance))
         _set_point_radius(point, _sample_scalar_by_distance(source_distances, radii, target_distance))
         _set_point_tilt(point, _sample_scalar_by_distance(source_distances, tilts, target_distance))
 
@@ -1270,270 +1409,6 @@ def _segment_distribution_runs(spline, selected_mode):
     if selected_mode:
         return [run for run in _selected_index_runs(spline) if len(run) >= 2]
     return [list(range(point_count))]
-
-
-def _set_point_selection(point, spline, selected):
-    if spline.type == "BEZIER":
-        point.select_control_point = selected
-        point.select_left_handle = selected
-        point.select_right_handle = selected
-        return
-
-    point.select = selected
-
-
-def _spline_point_state(spline, point, selected=False, reset_left=False, reset_right=False):
-    state = {
-        "co": _point_local_co(point, spline),
-        "radius": _point_radius(point),
-        "tilt": _point_tilt(point),
-        "selected": selected,
-        "weight_softbody": getattr(point, "weight_softbody", 0.0),
-        "reset_left": reset_left,
-        "reset_right": reset_right,
-    }
-
-    if spline.type == "BEZIER":
-        state.update(
-            {
-                "handle_left": point.handle_left.copy(),
-                "handle_right": point.handle_right.copy(),
-                "handle_left_type": point.handle_left_type,
-                "handle_right_type": point.handle_right_type,
-            }
-        )
-    else:
-        state["weight"] = float(point.co[3])
-
-    return state
-
-
-def _lerp_value(first, second, factor):
-    return first + (second - first) * factor
-
-
-def _bezier_lerp(first, second, factor):
-    return first.lerp(second, factor)
-
-
-def _split_bezier_cubic(cubic, factor):
-    p0, p1, p2, p3 = cubic
-    p01 = _bezier_lerp(p0, p1, factor)
-    p12 = _bezier_lerp(p1, p2, factor)
-    p23 = _bezier_lerp(p2, p3, factor)
-    p012 = _bezier_lerp(p01, p12, factor)
-    p123 = _bezier_lerp(p12, p23, factor)
-    p0123 = _bezier_lerp(p012, p123, factor)
-    return (p0, p01, p012, p0123), (p0123, p123, p23, p3)
-
-
-def _subdivide_bezier_cubic(cubic, cuts):
-    subcurves = []
-    remaining = cubic
-    previous_factor = 0.0
-
-    for cut_index in range(1, cuts + 1):
-        factor = cut_index / (cuts + 1)
-        local_factor = (factor - previous_factor) / (1.0 - previous_factor)
-        left, remaining = _split_bezier_cubic(remaining, local_factor)
-        subcurves.append(left)
-        previous_factor = factor
-
-    subcurves.append(remaining)
-    return subcurves
-
-
-def _bezier_subdivide_state(point, co, handle_left, handle_right, left_type, right_type, factor, other_point=None):
-    if other_point is None:
-        radius = _point_radius(point)
-        tilt = _point_tilt(point)
-        weight_softbody = getattr(point, "weight_softbody", 0.0)
-    else:
-        radius = _lerp_value(_point_radius(point), _point_radius(other_point), factor)
-        tilt = _lerp_value(_point_tilt(point), _point_tilt(other_point), factor)
-        weight_softbody = _lerp_value(
-            getattr(point, "weight_softbody", 0.0),
-            getattr(other_point, "weight_softbody", 0.0),
-            factor,
-        )
-
-    state = {
-        "co": co.copy(),
-        "handle_left": handle_left.copy(),
-        "handle_right": handle_right.copy(),
-        "handle_left_type": left_type,
-        "handle_right_type": right_type,
-        "radius": radius,
-        "tilt": tilt,
-        "selected": True,
-        "weight_softbody": weight_softbody,
-        "reset_left": False,
-        "reset_right": False,
-    }
-
-    return state
-
-
-def _conventional_bezier_states_for_run(points, run, cuts):
-    states = []
-
-    for offset in range(len(run) - 1):
-        start_point = points[run[offset]]
-        end_point = points[run[offset + 1]]
-        cubic = (
-            start_point.co.copy(),
-            start_point.handle_right.copy(),
-            end_point.handle_left.copy(),
-            end_point.co.copy(),
-        )
-        subcurves = _subdivide_bezier_cubic(cubic, cuts)
-        segment_states = []
-
-        for index in range(len(subcurves) + 1):
-            factor = index / len(subcurves)
-            if index == 0:
-                segment_states.append(
-                    _bezier_subdivide_state(
-                        start_point,
-                        subcurves[0][0],
-                        start_point.handle_left,
-                        subcurves[0][1],
-                        start_point.handle_left_type,
-                        "FREE",
-                        0.0,
-                    )
-                )
-            elif index == len(subcurves):
-                segment_states.append(
-                    _bezier_subdivide_state(
-                        end_point,
-                        subcurves[-1][3],
-                        subcurves[-1][2],
-                        end_point.handle_right,
-                        "FREE",
-                        end_point.handle_right_type,
-                        1.0,
-                    )
-                )
-            else:
-                segment_states.append(
-                    _bezier_subdivide_state(
-                        start_point,
-                        subcurves[index - 1][3],
-                        subcurves[index - 1][2],
-                        subcurves[index][1],
-                        "FREE",
-                        "FREE",
-                        factor,
-                        end_point,
-                    )
-                )
-
-        if offset > 0:
-            states[-1]["handle_right"] = segment_states[0]["handle_right"]
-            states[-1]["handle_right_type"] = segment_states[0]["handle_right_type"]
-            segment_states = segment_states[1:]
-
-        states.extend(segment_states)
-
-    return states
-
-
-def _interpolated_point_subdivide_state(spline, first_point, second_point, factor):
-    first_co = _point_local_co(first_point, spline)
-    second_co = _point_local_co(second_point, spline)
-    co = first_co.lerp(second_co, factor)
-    state = {
-        "co": co,
-        "radius": _lerp_value(_point_radius(first_point), _point_radius(second_point), factor),
-        "tilt": _lerp_value(_point_tilt(first_point), _point_tilt(second_point), factor),
-        "selected": True,
-        "weight_softbody": _lerp_value(
-            getattr(first_point, "weight_softbody", 0.0),
-            getattr(second_point, "weight_softbody", 0.0),
-            factor,
-        ),
-        "reset_left": False,
-        "reset_right": False,
-        "weight": _lerp_value(float(first_point.co[3]), float(second_point.co[3]), factor),
-    }
-    return state
-
-
-def _conventional_point_states_for_run(spline, points, run, cuts):
-    states = []
-
-    for offset in range(len(run) - 1):
-        first_point = points[run[offset]]
-        second_point = points[run[offset + 1]]
-
-        if offset == 0:
-            states.append(_spline_point_state(spline, first_point, selected=True))
-
-        for cut_index in range(1, cuts + 1):
-            factor = cut_index / (cuts + 1)
-            states.append(_interpolated_point_subdivide_state(spline, first_point, second_point, factor))
-
-        states.append(_spline_point_state(spline, second_point, selected=True))
-
-    return states
-
-
-def _reset_bezier_handles_from_subdivide_states(spline, states):
-    points = list(spline.bezier_points)
-    for index, (point, state) in enumerate(zip(points, states)):
-        if state["reset_left"]:
-            point.handle_left_type = "FREE"
-            if index == 0:
-                point.handle_left = point.co
-            else:
-                point.handle_left = point.co - (point.co - points[index - 1].co) / 3.0
-
-        if state["reset_right"]:
-            point.handle_right_type = "FREE"
-            if index == len(points) - 1:
-                point.handle_right = point.co
-            else:
-                point.handle_right = point.co + (points[index + 1].co - point.co) / 3.0
-
-
-def _rebuild_bezier_spline_from_subdivide_states(spline, states):
-    points = spline.bezier_points
-    extra_count = len(states) - len(points)
-    if extra_count > 0:
-        points.add(extra_count)
-        points = spline.bezier_points
-
-    for point, state in zip(points, states):
-        point.handle_left_type = state["handle_left_type"]
-        point.handle_right_type = state["handle_right_type"]
-        point.co = state["co"]
-        point.handle_left = state["handle_left"]
-        point.handle_right = state["handle_right"]
-        _set_point_radius(point, state["radius"])
-        _set_point_tilt(point, state["tilt"])
-        _set_point_selection(point, spline, state["selected"])
-        if hasattr(point, "weight_softbody"):
-            point.weight_softbody = state["weight_softbody"]
-
-    _reset_bezier_handles_from_subdivide_states(spline, states)
-
-
-def _rebuild_points_spline_from_subdivide_states(spline, states):
-    points = spline.points
-    extra_count = len(states) - len(points)
-    if extra_count > 0:
-        points.add(extra_count)
-        points = spline.points
-
-    for point, state in zip(points, states):
-        co = state["co"]
-        point.co = (co.x, co.y, co.z, state["weight"])
-        _set_point_radius(point, state["radius"])
-        _set_point_tilt(point, state["tilt"])
-        _set_point_selection(point, spline, state["selected"])
-        if hasattr(point, "weight_softbody"):
-            point.weight_softbody = state["weight_softbody"]
 
 
 def _apply_subdivide_distribution(context, curve_obj, spline, mode, curvature_bias, path_points):
@@ -1559,52 +1434,142 @@ def _apply_subdivide_distribution(context, curve_obj, spline, mode, curvature_bi
     return changed_count
 
 
-def _subdivide_selected_spline(context, curve_obj, spline, cuts, distribution_mode, curvature_bias):
-    points = list(_spline_points(spline))
-    runs = [run for run in _selected_index_runs(spline) if len(run) >= 3]
-    if not runs:
-        return 0
+def _integrated_curvature_scores(path_points, distances):
+    if len(path_points) < 3 or len(distances) < 2:
+        return []
 
-    path_points = []
-    if distribution_mode != "NONE":
-        path_points = _evaluated_spline_path_points(context, curve_obj, spline)
+    cumulative = _path_cumulative_distances(path_points)
+    curvatures = _path_smoothed_curvatures(path_points)
+    scores = []
 
-    replacements = {}
-    for run in runs:
-        if spline.type == "BEZIER":
-            states = _conventional_bezier_states_for_run(points, run, cuts)
-        else:
-            states = _conventional_point_states_for_run(spline, points, run, cuts)
-        if states:
-            replacements[run[0]] = (run[-1], states)
+    for segment_index in range(len(distances) - 1):
+        start_distance = distances[segment_index]
+        end_distance = distances[segment_index + 1]
+        score = 0.0
 
-    if not replacements:
-        return 0
+        for path_index in range(len(path_points) - 1):
+            overlap_start = max(start_distance, cumulative[path_index])
+            overlap_end = min(end_distance, cumulative[path_index + 1])
+            if overlap_end - overlap_start <= MIN_BONE_LENGTH:
+                continue
 
-    rebuilt_states = []
-    index = 0
-    while index < len(points):
-        replacement = replacements.get(index)
-        if replacement is not None:
-            end_index, states = replacement
-            rebuilt_states.extend(states)
-            index = end_index + 1
+            curvature = max(curvatures[path_index], curvatures[path_index + 1])
+            score += curvature * (overlap_end - overlap_start)
+
+        scores.append(score)
+
+    return scores
+
+
+def _auto_subdivide_cut_counts(curve_obj, spline, candidate_segments, path_points, detail_factor):
+    detail = max(0.0, min(1.0, float(detail_factor)))
+    if detail <= 0.0:
+        return {}
+
+    point_count = _control_point_count(spline)
+    if point_count < 2 or not candidate_segments:
+        return {}
+
+    indices = list(range(point_count))
+    distances = _control_distances_on_path(curve_obj, spline, indices, path_points)
+    scores = _integrated_curvature_scores(path_points, distances)
+    if not scores:
+        return {}
+
+    max_score = max(scores)
+    if max_score <= MIN_BONE_LENGTH:
+        return {}
+
+    threshold = 0.35
+    strength = 4.0
+    cut_counts = {}
+
+    for segment_index in sorted(set(candidate_segments)):
+        if segment_index < 0 or segment_index >= len(scores):
             continue
 
-        rebuilt_states.append(_spline_point_state(spline, points[index], selected=False))
-        index += 1
+        normalized = scores[segment_index] / max_score
+        if normalized <= threshold:
+            continue
 
-    added_count = len(rebuilt_states) - len(points)
-    if added_count <= 0:
-        return 0
+        scaled = (normalized - threshold) / (1.0 - threshold) * detail * strength
+        cuts = int(scaled + 1.0e-6)
+        if cuts > 0:
+            cut_counts[segment_index] = min(4, cuts)
 
-    if spline.type == "BEZIER":
-        _rebuild_bezier_spline_from_subdivide_states(spline, rebuilt_states)
-    else:
-        _rebuild_points_spline_from_subdivide_states(spline, rebuilt_states)
+    return cut_counts
 
-    _apply_subdivide_distribution(context, curve_obj, spline, distribution_mode, curvature_bias, path_points)
-    return added_count
+
+def _curve_selection_runs_or_full(splines):
+    selected_mode = _has_selected_points(splines)
+    runs_by_spline = []
+
+    for spline in splines:
+        if selected_mode:
+            runs = [run for run in _selected_index_runs(spline) if len(run) >= 2]
+        else:
+            point_count = _control_point_count(spline)
+            runs = [list(range(point_count))] if point_count >= 2 else []
+        runs_by_spline.append(runs)
+
+    return selected_mode, runs_by_spline
+
+
+def _segments_from_runs(runs):
+    segments = []
+    for run in runs:
+        for index in range(run[0], run[-1]):
+            segments.append(index)
+    return segments
+
+
+def _contiguous_segment_runs(segment_indices):
+    runs = []
+    current = []
+
+    for segment_index in sorted(set(segment_indices)):
+        if current and segment_index != current[-1] + 1:
+            runs.append(current)
+            current = []
+        current.append(segment_index)
+
+    if current:
+        runs.append(current)
+
+    return runs
+
+
+def _set_curve_point_selection(curve_obj, selected=False):
+    for spline in curve_obj.data.splines:
+        if not _is_supported_spline(spline):
+            continue
+
+        for point in _spline_points(spline):
+            if spline.type == "BEZIER":
+                point.select_control_point = selected
+                point.select_left_handle = selected
+                point.select_right_handle = selected
+            else:
+                point.select = selected
+
+
+def _select_spline_index_range(spline, start_index, end_index, selected=True):
+    points = list(_spline_points(spline))
+    start_index = max(0, min(len(points) - 1, start_index))
+    end_index = max(0, min(len(points) - 1, end_index))
+
+    for index in range(min(start_index, end_index), max(start_index, end_index) + 1):
+        point = points[index]
+        if spline.type == "BEZIER":
+            point.select_control_point = selected
+            point.select_left_handle = selected
+            point.select_right_handle = selected
+        else:
+            point.select = selected
+
+
+def _mapped_original_index(original_index, cut_counts):
+    return original_index + sum(cuts for segment_index, cuts in cut_counts.items() if segment_index < original_index)
 
 
 def _path_endpoint_data(context, curve_obj, spline):
@@ -2659,18 +2624,18 @@ class CTK_PG_resolution_collection_item(bpy.types.PropertyGroup):
 class CTK_PG_settings(bpy.types.PropertyGroup):
     show_curve_controls: BoolProperty(name="Curve Controls", default=True)
     show_segment_control: BoolProperty(name="Segment Control", default=True)
-    show_resolution_batch: BoolProperty(name="Resolution Batch", default=True)
     show_smooth_reset: BoolProperty(name="Smooth / Reset", default=True)
-    show_locks: BoolProperty(name="Locks", default=True)
-    show_surface_tools: BoolProperty(name="Surface Tools", default=True)
     show_length_tools: BoolProperty(name="Length Tools", default=True)
+    show_surface_tools: BoolProperty(name="Surface Tools", default=True)
+    show_locks: BoolProperty(name="Locks", default=True)
     show_profile_tools: BoolProperty(name="Profile / Taper", default=True)
     show_bevel_manager: BoolProperty(name="Bevel Manager", default=True)
-    show_validation_tools: BoolProperty(name="Validation", default=True)
+    show_caps: BoolProperty(name="Caps", default=True)
+    show_resolution_batch: BoolProperty(name="Resolution Batch", default=True)
     show_lod_tools: BoolProperty(name="LOD Tools", default=True)
     show_selection_tools: BoolProperty(name="Selection Tools", default=True)
+    show_validation_tools: BoolProperty(name="Validation", default=True)
     show_mirror: BoolProperty(name="Mirror", default=True)
-    show_caps: BoolProperty(name="Caps", default=True)
     show_convert_tools: BoolProperty(name="Convert / Bridge", default=True)
     show_rigging: BoolProperty(name="Rigging", default=True)
 
@@ -2727,6 +2692,15 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
         default=1,
         min=1,
         max=16,
+    )
+
+    auto_subdivide_factor: FloatProperty(
+        name="Auto Detail",
+        description="How aggressively Auto Subdivide adds cuts in curved areas",
+        default=0.5,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
     )
 
     surface_object: PointerProperty(
@@ -3271,31 +3245,201 @@ class CTK_OT_segment_subdivide_selected(bpy.types.Operator):
             return {"CANCELLED"}
 
         settings = context.scene.curve_toolkit
-        added_count = 0
-        has_selected_points = False
+        before_counts = [_control_point_count(spline) for spline in splines]
+        path_snapshots = []
+        has_valid_segment = False
 
-        for spline in splines:
-            selected_runs = _selected_index_runs(spline)
+        for spline_index, spline in enumerate(splines):
+            selected_runs = [run for run in _selected_index_runs(spline) if len(run) >= 2]
             if selected_runs:
-                has_selected_points = True
-            added_count += _subdivide_selected_spline(
-                context,
-                curve_obj,
-                spline,
-                settings.subdivide_cuts,
-                settings.subdivide_distribution,
-                settings.curvature_bias,
-            )
+                has_valid_segment = True
+                path_points = []
+                if settings.subdivide_distribution != "NONE":
+                    path_points = _evaluated_spline_path_points(context, curve_obj, spline)
+                path_snapshots.append((spline_index, path_points))
 
-        if added_count == 0:
-            if not has_selected_points:
-                self.report({"ERROR"}, "Select at least 3 contiguous curve points to subdivide.")
-            else:
-                self.report({"ERROR"}, "Selected ranges must contain at least 3 contiguous points.")
+        if not has_valid_segment:
+            self.report({"ERROR"}, "Select at least 2 contiguous curve points to subdivide.")
+            return {"CANCELLED"}
+
+        previous_mode = curve_obj.mode
+        _set_active_only(context, curve_obj)
+
+        try:
+            if curve_obj.mode != "EDIT":
+                bpy.ops.object.mode_set(mode="EDIT")
+            result = bpy.ops.curve.subdivide(number_cuts=settings.subdivide_cuts)
+            bpy.ops.object.mode_set(mode="OBJECT")
+        except Exception as exc:
+            if curve_obj.mode != "OBJECT":
+                bpy.ops.object.mode_set(mode="OBJECT")
+            if previous_mode != "OBJECT":
+                bpy.ops.object.mode_set(mode=previous_mode)
+            self.report({"ERROR"}, f"Blender subdivide failed: {exc}")
+            return {"CANCELLED"}
+
+        if "CANCELLED" in result:
+            if previous_mode != "OBJECT":
+                bpy.ops.object.mode_set(mode=previous_mode)
+            self.report({"ERROR"}, "Blender subdivide could not process the selected segments.")
             return {"CANCELLED"}
 
         context.view_layer.update()
+        added_count = sum(
+            max(0, _control_point_count(curve_obj.data.splines[spline_index]) - before_count)
+            for spline_index, before_count in enumerate(before_counts)
+            if spline_index < len(curve_obj.data.splines)
+        )
+
+        if added_count == 0:
+            if previous_mode != "OBJECT":
+                bpy.ops.object.mode_set(mode=previous_mode)
+            self.report({"ERROR"}, "No curve points were added.")
+            return {"CANCELLED"}
+
+        if settings.subdivide_distribution != "NONE":
+            for spline_index, path_points in path_snapshots:
+                if spline_index >= len(curve_obj.data.splines):
+                    continue
+                _apply_subdivide_distribution(
+                    context,
+                    curve_obj,
+                    curve_obj.data.splines[spline_index],
+                    settings.subdivide_distribution,
+                    settings.curvature_bias,
+                    path_points,
+                )
+
+        context.view_layer.update()
+        if previous_mode != "OBJECT":
+            bpy.ops.object.mode_set(mode=previous_mode)
+
         self.report({"INFO"}, f"Added {added_count} curve points.")
+        return {"FINISHED"}
+
+
+class CTK_OT_segment_auto_subdivide(bpy.types.Operator):
+    bl_idname = "curve_toolkit.segment_auto_subdivide"
+    bl_label = "Auto Subdivide"
+    bl_description = "Detect curved areas and add only the cuts needed before curve distribution"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_curve(context) is not None
+
+    def execute(self, context):
+        curve_obj, splines = _require_editable_open_curve(self, context)
+        if curve_obj is None:
+            return {"CANCELLED"}
+
+        settings = context.scene.curve_toolkit
+        selected_mode, runs_by_spline = _curve_selection_runs_or_full(splines)
+        path_snapshots = {}
+        cuts_by_spline = {}
+
+        for spline_index, spline in enumerate(splines):
+            runs = runs_by_spline[spline_index]
+            candidate_segments = _segments_from_runs(runs)
+            if not candidate_segments:
+                continue
+
+            path_points = _evaluated_spline_path_points(context, curve_obj, spline)
+            if len(path_points) < 2 or not _has_valid_segment(path_points):
+                continue
+
+            cut_counts = _auto_subdivide_cut_counts(
+                curve_obj,
+                spline,
+                candidate_segments,
+                path_points,
+                settings.auto_subdivide_factor,
+            )
+            if cut_counts:
+                path_snapshots[spline_index] = path_points
+                cuts_by_spline[spline_index] = cut_counts
+
+        if not cuts_by_spline:
+            self.report({"ERROR"}, "Auto Subdivide did not find any segment that needs cuts at this detail value.")
+            return {"CANCELLED"}
+
+        previous_mode = curve_obj.mode
+        _set_active_only(context, curve_obj)
+        added_count = 0
+
+        try:
+            if curve_obj.mode != "OBJECT":
+                bpy.ops.object.mode_set(mode="OBJECT")
+
+            for spline_index in sorted(cuts_by_spline):
+                for segment_index, cuts in sorted(cuts_by_spline[spline_index].items(), reverse=True):
+                    _set_curve_point_selection(curve_obj, selected=False)
+                    spline = curve_obj.data.splines[spline_index]
+                    if segment_index + 1 >= _control_point_count(spline):
+                        continue
+
+                    before_count = _control_point_count(spline)
+                    _select_spline_index_range(spline, segment_index, segment_index + 1, selected=True)
+
+                    bpy.ops.object.mode_set(mode="EDIT")
+                    result = bpy.ops.curve.subdivide(number_cuts=cuts)
+                    bpy.ops.object.mode_set(mode="OBJECT")
+                    if "CANCELLED" in result:
+                        continue
+
+                    after_count = _control_point_count(curve_obj.data.splines[spline_index])
+                    added_count += max(0, after_count - before_count)
+
+            if added_count == 0:
+                if previous_mode != "OBJECT":
+                    bpy.ops.object.mode_set(mode=previous_mode)
+                self.report({"ERROR"}, "Blender subdivide could not add auto cuts.")
+                return {"CANCELLED"}
+
+            context.view_layer.update()
+            _set_curve_point_selection(curve_obj, selected=False)
+
+            for spline_index, path_points in path_snapshots.items():
+                if spline_index >= len(curve_obj.data.splines):
+                    continue
+
+                spline = curve_obj.data.splines[spline_index]
+                cut_counts = cuts_by_spline[spline_index]
+                runs = runs_by_spline[spline_index]
+
+                if selected_mode:
+                    for run in runs:
+                        start_index = _mapped_original_index(run[0], cut_counts)
+                        end_index = _mapped_original_index(run[-1], cut_counts)
+                        _select_spline_index_range(spline, start_index, end_index, selected=True)
+                else:
+                    for segment_run in _contiguous_segment_runs(cut_counts.keys()):
+                        start_index = _mapped_original_index(segment_run[0], cut_counts)
+                        end_index = _mapped_original_index(segment_run[-1] + 1, cut_counts)
+                        _select_spline_index_range(spline, start_index, end_index, selected=True)
+
+                _apply_subdivide_distribution(
+                    context,
+                    curve_obj,
+                    spline,
+                    "CURVE",
+                    settings.curvature_bias,
+                    path_points,
+                )
+
+            context.view_layer.update()
+        except Exception as exc:
+            if curve_obj.mode != "OBJECT":
+                bpy.ops.object.mode_set(mode="OBJECT")
+            if previous_mode != "OBJECT":
+                bpy.ops.object.mode_set(mode=previous_mode)
+            self.report({"ERROR"}, f"Auto Subdivide failed: {exc}")
+            return {"CANCELLED"}
+
+        if previous_mode != "OBJECT":
+            bpy.ops.object.mode_set(mode=previous_mode)
+
+        self.report({"INFO"}, f"Auto Subdivide added {added_count} curve points.")
         return {"FINISHED"}
 
 
@@ -4624,28 +4768,30 @@ class CTK_PT_tools(bpy.types.Panel):
             segment_column.operator(CTK_OT_segment_subdivide_selected.bl_idname)
 
             segment_column.separator()
+            segment_column.label(text="Auto")
+            segment_column.prop(settings, "auto_subdivide_factor", slider=True)
+            segment_column.operator(CTK_OT_segment_auto_subdivide.bl_idname)
+
+            segment_column.separator()
             segment_column.separator()
             segment_column.label(text="Fit")
             op = segment_column.operator(CTK_OT_segment_distribute.bl_idname, text="Fit To Visual Path")
             op.mode = "FIT"
 
-        surface_box = layout.box()
-        if self._draw_foldout(surface_box, settings, "show_surface_tools", "Surface Tools", "MOD_SHRINKWRAP"):
-            row = surface_box.row(align=True)
-            row.prop(settings, "surface_object")
-            row.operator(CTK_OT_set_surface_from_active.bl_idname, text="", icon="EYEDROPPER")
-            surface_box.prop(settings, "surface_offset")
+        smooth_box = layout.box()
+        if self._draw_foldout(smooth_box, settings, "show_smooth_reset", "Smooth / Reset", "MOD_SMOOTH"):
+            smooth_box.prop(settings, "smooth_factor", slider=True)
+            smooth_box.prop(settings, "smooth_steps")
 
-            row = surface_box.row(align=True)
-            op = row.operator(CTK_OT_surface_snap.bl_idname, text="Snap Root")
-            op.mode = "ROOT"
-            op = row.operator(CTK_OT_surface_snap.bl_idname, text="Snap Curve")
-            op.mode = "CURVE"
-            row = surface_box.row(align=True)
-            op = row.operator(CTK_OT_surface_snap.bl_idname, text="Offset Curve")
-            op.mode = "OFFSET"
-            op = row.operator(CTK_OT_surface_snap.bl_idname, text="Push Out")
-            op.mode = "PUSH_OUT"
+            row = smooth_box.row(align=True)
+            row.operator(CTK_OT_smooth_scale.bl_idname)
+            row.operator(CTK_OT_smooth_curve.bl_idname)
+            row.operator(CTK_OT_smooth_twist.bl_idname)
+
+            row = smooth_box.row(align=True)
+            row.operator(CTK_OT_reset_scale.bl_idname)
+            row.operator(CTK_OT_reset_path.bl_idname, text="Reset Curve")
+            row.operator(CTK_OT_reset_twist.bl_idname)
 
         length_box = layout.box()
         if self._draw_foldout(length_box, settings, "show_length_tools", "Length Tools", "DRIVER_DISTANCE"):
@@ -4665,66 +4811,23 @@ class CTK_PT_tools(bpy.types.Panel):
             row.operator(CTK_OT_length_store.bl_idname)
             row.operator(CTK_OT_length_restore.bl_idname)
 
-        profile_box = layout.box()
-        if self._draw_foldout(profile_box, settings, "show_profile_tools", "Profile / Taper", "IPO_EASE_IN_OUT"):
-            profile_box.prop(settings, "profile_preset")
-            row = profile_box.row(align=True)
-            row.prop(settings, "profile_root_radius")
-            row.prop(settings, "profile_mid_radius")
-            row.prop(settings, "profile_tip_radius")
-            profile_box.operator(CTK_OT_profile_apply.bl_idname)
+        surface_box = layout.box()
+        if self._draw_foldout(surface_box, settings, "show_surface_tools", "Surface Tools", "MOD_SHRINKWRAP"):
+            row = surface_box.row(align=True)
+            row.prop(settings, "surface_object")
+            row.operator(CTK_OT_set_surface_from_active.bl_idname, text="", icon="EYEDROPPER")
+            surface_box.prop(settings, "surface_offset")
 
-            row = profile_box.row(align=True)
-            row.operator(CTK_OT_profile_copy.bl_idname)
-            row.operator(CTK_OT_profile_paste.bl_idname)
-
-        resolution_box = layout.box()
-        if self._draw_foldout(resolution_box, settings, "show_resolution_batch", "Resolution Batch", "OUTLINER_COLLECTION"):
-            row = resolution_box.row(align=True)
-            row.prop(settings, "resolution_collection")
-            row.operator(CTK_OT_add_resolution_collection.bl_idname, text="", icon="ADD")
-
-            collections = _resolution_batch_collections(settings)
-            if settings.resolution_collections:
-                resolution_box.label(text=f"Collections: {len(collections)}")
-                for index, item in enumerate(settings.resolution_collections):
-                    row = resolution_box.row(align=True)
-                    row.label(text=item.collection.name if item.collection is not None else "Missing Collection")
-                    op = row.operator(CTK_OT_remove_resolution_collection.bl_idname, text="", icon="X")
-                    op.index = index
-            else:
-                resolution_box.label(text=f"Collections: {len(collections)}")
-
-            path_curves, bevel_references = _resolution_batch_targets_from_collections(collections)
-            resolution_box.label(text=f"Paths: {len(path_curves)}  Bevel Refs: {len(bevel_references)}")
-            resolution_box.prop(settings, "path_resolution")
-            resolution_box.prop(settings, "bevel_reference_resolution")
-            resolution_box.operator(CTK_OT_refresh_resolution_batch.bl_idname)
-
-        bevel_box = layout.box()
-        if self._draw_foldout(bevel_box, settings, "show_bevel_manager", "Bevel Manager", "CURVE_BEZCURVE"):
-            bevel_box.prop(settings, "bevel_object")
-            row = bevel_box.row(align=True)
-            row.operator(CTK_OT_bevel_assign.bl_idname)
-            row.operator(CTK_OT_bevel_copy_active.bl_idname)
-            row = bevel_box.row(align=True)
-            row.operator(CTK_OT_bevel_clear.bl_idname)
-            row.operator(CTK_OT_bevel_select_same.bl_idname)
-
-        smooth_box = layout.box()
-        if self._draw_foldout(smooth_box, settings, "show_smooth_reset", "Smooth / Reset", "MOD_SMOOTH"):
-            smooth_box.prop(settings, "smooth_factor", slider=True)
-            smooth_box.prop(settings, "smooth_steps")
-
-            row = smooth_box.row(align=True)
-            row.operator(CTK_OT_smooth_scale.bl_idname)
-            row.operator(CTK_OT_smooth_curve.bl_idname)
-            row.operator(CTK_OT_smooth_twist.bl_idname)
-
-            row = smooth_box.row(align=True)
-            row.operator(CTK_OT_reset_scale.bl_idname)
-            row.operator(CTK_OT_reset_path.bl_idname, text="Reset Curve")
-            row.operator(CTK_OT_reset_twist.bl_idname)
+            row = surface_box.row(align=True)
+            op = row.operator(CTK_OT_surface_snap.bl_idname, text="Snap Root")
+            op.mode = "ROOT"
+            op = row.operator(CTK_OT_surface_snap.bl_idname, text="Snap Curve")
+            op.mode = "CURVE"
+            row = surface_box.row(align=True)
+            op = row.operator(CTK_OT_surface_snap.bl_idname, text="Offset Curve")
+            op.mode = "OFFSET"
+            op = row.operator(CTK_OT_surface_snap.bl_idname, text="Push Out")
+            op.mode = "PUSH_OUT"
 
         lock_box = layout.box()
         if self._draw_foldout(lock_box, settings, "show_locks", "Locks", "LOCKED"):
@@ -4748,11 +4851,62 @@ class CTK_PT_tools(bpy.types.Panel):
             op.mode = "TIP"
             op.enabled = False
 
-        validation_box = layout.box()
-        if self._draw_foldout(validation_box, settings, "show_validation_tools", "Validation", "CHECKMARK"):
-            validation_box.operator(CTK_OT_validate_curves.bl_idname)
-            validation_box.label(text=settings.validation_report)
-            validation_box.operator(CTK_OT_select_validation_problems.bl_idname)
+        profile_box = layout.box()
+        if self._draw_foldout(profile_box, settings, "show_profile_tools", "Profile / Taper", "IPO_EASE_IN_OUT"):
+            profile_box.prop(settings, "profile_preset")
+            row = profile_box.row(align=True)
+            row.prop(settings, "profile_root_radius")
+            row.prop(settings, "profile_mid_radius")
+            row.prop(settings, "profile_tip_radius")
+            profile_box.operator(CTK_OT_profile_apply.bl_idname)
+
+            row = profile_box.row(align=True)
+            row.operator(CTK_OT_profile_copy.bl_idname)
+            row.operator(CTK_OT_profile_paste.bl_idname)
+
+        bevel_box = layout.box()
+        if self._draw_foldout(bevel_box, settings, "show_bevel_manager", "Bevel Manager", "CURVE_BEZCURVE"):
+            bevel_box.prop(settings, "bevel_object")
+            row = bevel_box.row(align=True)
+            row.operator(CTK_OT_bevel_assign.bl_idname)
+            row.operator(CTK_OT_bevel_copy_active.bl_idname)
+            row = bevel_box.row(align=True)
+            row.operator(CTK_OT_bevel_clear.bl_idname)
+            row.operator(CTK_OT_bevel_select_same.bl_idname)
+
+        caps_box = layout.box()
+        if self._draw_foldout(caps_box, settings, "show_caps", "Caps", "MESH_DATA"):
+            row = caps_box.row(align=True)
+            op = row.operator(CTK_OT_set_fill_caps.bl_idname, text="Root", depress=cap_root and not cap_tip)
+            op.mode = "ROOT"
+            op = row.operator(CTK_OT_set_fill_caps.bl_idname, text="Tip", depress=cap_tip and not cap_root)
+            op.mode = "TIP"
+            op = row.operator(CTK_OT_set_fill_caps.bl_idname, text="Ends", depress=cap_root and cap_tip)
+            op.mode = "BOTH"
+            caps_box.operator(CTK_OT_set_fill_caps.bl_idname, text="Open Caps", depress=caps_open).mode = "OPEN"
+
+        resolution_box = layout.box()
+        if self._draw_foldout(resolution_box, settings, "show_resolution_batch", "Resolution Batch", "OUTLINER_COLLECTION"):
+            row = resolution_box.row(align=True)
+            row.prop(settings, "resolution_collection")
+            row.operator(CTK_OT_add_resolution_collection.bl_idname, text="", icon="ADD")
+
+            collections = _resolution_batch_collections(settings)
+            if settings.resolution_collections:
+                resolution_box.label(text=f"Collections: {len(collections)}")
+                for index, item in enumerate(settings.resolution_collections):
+                    row = resolution_box.row(align=True)
+                    row.label(text=item.collection.name if item.collection is not None else "Missing Collection")
+                    op = row.operator(CTK_OT_remove_resolution_collection.bl_idname, text="", icon="X")
+                    op.index = index
+            else:
+                resolution_box.label(text=f"Collections: {len(collections)}")
+
+            path_curves, bevel_references = _resolution_batch_targets_from_collections(collections)
+            resolution_box.label(text=f"Paths: {len(path_curves)}  Bevel Refs: {len(bevel_references)}")
+            resolution_box.prop(settings, "path_resolution")
+            resolution_box.prop(settings, "bevel_reference_resolution")
+            resolution_box.operator(CTK_OT_refresh_resolution_batch.bl_idname)
 
         lod_box = layout.box()
         if self._draw_foldout(lod_box, settings, "show_lod_tools", "LOD Tools", "SETTINGS"):
@@ -4784,20 +4938,15 @@ class CTK_PT_tools(bpy.types.Panel):
             op = row.operator(CTK_OT_select_curves_by_length.bl_idname, text="Longer")
             op.mode = "LONGER"
 
+        validation_box = layout.box()
+        if self._draw_foldout(validation_box, settings, "show_validation_tools", "Validation", "CHECKMARK"):
+            validation_box.operator(CTK_OT_validate_curves.bl_idname)
+            validation_box.label(text=settings.validation_report)
+            validation_box.operator(CTK_OT_select_validation_problems.bl_idname)
+
         mirror_box = layout.box()
         if self._draw_foldout(mirror_box, settings, "show_mirror", "Mirror", "MOD_MIRROR"):
             mirror_box.operator(CTK_OT_duplicate_mirror_selected_curves.bl_idname)
-
-        caps_box = layout.box()
-        if self._draw_foldout(caps_box, settings, "show_caps", "Caps", "MESH_DATA"):
-            row = caps_box.row(align=True)
-            op = row.operator(CTK_OT_set_fill_caps.bl_idname, text="Root", depress=cap_root and not cap_tip)
-            op.mode = "ROOT"
-            op = row.operator(CTK_OT_set_fill_caps.bl_idname, text="Tip", depress=cap_tip and not cap_root)
-            op.mode = "TIP"
-            op = row.operator(CTK_OT_set_fill_caps.bl_idname, text="Ends", depress=cap_root and cap_tip)
-            op.mode = "BOTH"
-            caps_box.operator(CTK_OT_set_fill_caps.bl_idname, text="Open Caps", depress=caps_open).mode = "OPEN"
 
         convert_box = layout.box()
         if self._draw_foldout(convert_box, settings, "show_convert_tools", "Convert / Bridge", "MESH_DATA"):
@@ -4879,6 +5028,7 @@ classes = (
     CTK_OT_snap_cursor,
     CTK_OT_segment_distribute,
     CTK_OT_segment_subdivide_selected,
+    CTK_OT_segment_auto_subdivide,
     CTK_OT_smooth_scale,
     CTK_OT_smooth_curve,
     CTK_OT_smooth_twist,

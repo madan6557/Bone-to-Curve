@@ -43,50 +43,16 @@ Subdivide:
 - `Sub Distribution`: optionally redistributes the subdivided selection with `None`, `Evenly`, or `Curve`.
 - `Subdivide Selected`: inserts conventional cuts between selected points, then applies the chosen sub distribution when it is not `None`.
 
+Auto:
+
+- `Auto Detail`: controls how aggressively automatic subdivision adds cuts in curved areas.
+- `Auto Subdivide`: detects the strongest curvature intervals, inserts cuts only where needed, then applies curve distribution from the pre-subdivide visual path.
+
 Fit:
 
 - `Fit To Visual Path`: moves the control path closer to the current evaluated visual path without changing point count.
 
-Distribution and fit tools use selected contiguous point ranges when points are selected. If no points are selected, they process the whole open spline. Distribution modes preserve radius and twist profiles while moving control point placement along the current evaluated path. `Subdivide Selected` requires at least 3 contiguous selected points. `None` sub distribution keeps subdivision conventional. `Evenly` and `Curve` sub distribution redistribute the selected subdivided range after cuts are inserted. `Fit To Visual Path` is separate because it intentionally projects controls to their current evaluated positions and can change shape. Segment Control keeps object transforms, bevel references, caps, and materials stable.
-
-## Surface Tools
-
-- `Surface`: registered mesh object used for snap and collision helpers.
-- `Offset`: distance from the surface normal used by snap and push tools.
-- `Snap Root`: moves each spline root to the nearest surface point plus offset.
-- `Snap Curve`: moves all control points to the nearest surface point plus offset.
-- `Offset Curve`: moves the whole curve so the root reaches the surface while preserving the curve shape.
-- `Push Out`: only moves points that are closer than the offset distance along the surface normal.
-
-## Length Tools
-
-- `Length` and `Set Length`: scale each spline from its root to a target length.
-- `Match Active Length`: applies the active curve's first spline length to selected curves.
-- `Trim Root` and `Trim Tip`: shorten splines by the Trim distance while keeping the same control point count.
-- `Store Length` and `Restore Length`: save and restore per-spline lengths on each curve object.
-
-## Profile / Taper
-
-- Radius presets: `Flat`, `Root Thick`, `Tip Thin`, `Both Thin`, and `Sharp Taper`.
-- `Apply Preset`: loads the selected preset into the numeric controls and applies it to selected curves or selected point ranges.
-- `Root`, `Middle`, and `Tip` are live adjustment controls. Editing these values reapplies a custom Root-Middle-Tip profile immediately.
-- `Copy Profile` and `Paste Profile`: copy the active curve's radius profile and resample it onto selected curves.
-
-## Resolution Batch
-
-- `Add Collection`: chooses a collection and registers it with the add button. Child collections are included.
-- Registered collections can be removed from the list with the remove button.
-- `Paths` and `Bevel Refs`: show how many path curves and bevel reference curves are currently detected.
-- `Path Resolution`: live updates `resolution_u` and `render_resolution_u` for every detected path curve.
-- `Bevel Reference Resolution`: live updates `resolution_u` and `render_resolution_u` for every unique curve used as a path bevel object.
-- `Refresh`: reports the current target counts without changing any resolution values.
-
-## Bevel Manager
-
-- `Assign Bevel`: assigns the chosen curve object as the bevel object for selected curves.
-- `Copy Active Bevel`: copies the active curve's bevel object to selected curves.
-- `Clear Bevel`: clears bevel object references from selected curves.
-- `Select Same Bevel`: selects all scene curves using the active curve's bevel object.
+Distribution and fit tools use selected contiguous point ranges when points are selected. If no points are selected, they process the whole open spline. Distribution modes preserve radius and twist profiles while moving control point placement along the current evaluated path. `Subdivide Selected` requires at least 2 contiguous selected points. `None` sub distribution keeps Blender's conventional subdivision. `Evenly` and `Curve` sub distribution redistribute the selected subdivided range after cuts are inserted. `Auto Subdivide` uses integrated curvature so low-curvature intervals receive few cuts or no cuts. `Fit To Visual Path` is separate because it intentionally projects controls to their current evaluated positions and can change shape. Segment Control keeps object transforms, bevel references, caps, and materials stable.
 
 ## Smooth / Reset
 
@@ -99,6 +65,22 @@ Distribution and fit tools use selected contiguous point ranges when points are 
 - `Reset Curve`: uses the same behavior as `Reset Path`.
 - `Reset Twist`: sets curve point tilt values to `0`.
 
+## Length Tools
+
+- `Length` and `Set Length`: scale each spline from its root to a target length.
+- `Match Active Length`: applies the active curve's first spline length to selected curves.
+- `Trim Root` and `Trim Tip`: shorten splines by the Trim distance while keeping the same control point count.
+- `Store Length` and `Restore Length`: save and restore per-spline lengths on each curve object.
+
+## Surface Tools
+
+- `Surface`: registered mesh object used for snap and collision helpers.
+- `Offset`: distance from the surface normal used by snap and push tools.
+- `Snap Root`: moves each spline root to the nearest surface point plus offset.
+- `Snap Curve`: moves all control points to the nearest surface point plus offset.
+- `Offset Curve`: moves the whole curve so the root reaches the surface while preserving the curve shape.
+- `Push Out`: only moves points that are closer than the offset distance along the surface normal.
+
 ## Locks
 
 - `Lock Twist`: stores the current twist state and preserves it when curve points move without changing Blender's twist method.
@@ -107,11 +89,33 @@ Distribution and fit tools use selected contiguous point ranges when points are 
 - `Unlock Root` and `Unlock Tip`: bake the locked endpoint position into the curve before releasing the stored endpoint lock.
 - Lock buttons show their active state in the panel.
 
-## Validation
+## Profile / Taper
 
-- `Check Curves`: checks selected curves, or all scene curves if none are selected.
-- The report counts missing bevel objects, zero-length splines, overlapping points, non-applied object scale, closed splines, and active twist locks.
-- `Select Problems`: selects curves found by the latest validation.
+- Radius presets: `Flat`, `Root Thick`, `Tip Thin`, `Both Thin`, and `Sharp Taper`.
+- `Apply Preset`: loads the selected preset into the numeric controls and applies it to selected curves or selected point ranges.
+- `Root`, `Middle`, and `Tip` are live adjustment controls. Editing these values reapplies a custom Root-Middle-Tip profile immediately.
+- `Copy Profile` and `Paste Profile`: copy the active curve's radius profile and resample it onto selected curves.
+
+## Bevel Manager
+
+- `Assign Bevel`: assigns the chosen curve object as the bevel object for selected curves.
+- `Copy Active Bevel`: copies the active curve's bevel object to selected curves.
+- `Clear Bevel`: clears bevel object references from selected curves.
+- `Select Same Bevel`: selects all scene curves using the active curve's bevel object.
+
+## Caps
+
+`Root`, `Tip`, and `Ends` close curve geometry caps without changing point radius scale. `Open Caps` disables cap filling.
+Caps buttons show the current cap state in the panel.
+
+## Resolution Batch
+
+- `Add Collection`: chooses a collection and registers it with the add button. Child collections are included.
+- Registered collections can be removed from the list with the remove button.
+- `Paths` and `Bevel Refs`: show how many path curves and bevel reference curves are currently detected.
+- `Path Resolution`: live updates `resolution_u` and `render_resolution_u` for every detected path curve.
+- `Bevel Reference Resolution`: live updates `resolution_u` and `render_resolution_u` for every unique curve used as a path bevel object.
+- `Refresh`: reports the current target counts without changing any resolution values.
 
 ## LOD Tools
 
@@ -122,14 +126,15 @@ Distribution and fit tools use selected contiguous point ranges when points are 
 - Point selection: roots, tips, all points, or clear point selection.
 - Curve selection by length threshold: shorter or longer than the configured Length value.
 
+## Validation
+
+- `Check Curves`: checks selected curves, or all scene curves if none are selected.
+- The report counts missing bevel objects, zero-length splines, overlapping points, non-applied object scale, closed splines, and active twist locks.
+- `Select Problems`: selects curves found by the latest validation.
+
 ## Mirror
 
 `Duplicate Mirror` duplicates all selected curve objects and mirrors them across global X center. Object and data names swap common side tokens such as `.L` and `.R`; names without a side token receive `_mirror`.
-
-## Caps
-
-`Root`, `Tip`, and `Ends` close curve geometry caps without changing point radius scale. `Open Caps` disables cap filling.
-Caps buttons show the current cap state in the panel.
 
 ## Convert / Bridge
 
