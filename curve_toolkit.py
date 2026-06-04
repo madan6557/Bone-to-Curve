@@ -2229,7 +2229,7 @@ def _apply_endpoint_locks_to_curve(curve_obj):
 def _ctk_curve_lock_handler(_scene, _depsgraph):
     global _CURVE_LOCK_HANDLER_RUNNING
 
-    if _CURVE_LOCK_HANDLER_RUNNING:
+    if _CURVE_LOCK_HANDLER_RUNNING or not _preview_objects_available():
         return
 
     _CURVE_LOCK_HANDLER_RUNNING = True
@@ -3246,7 +3246,12 @@ def _store_current_preview_signature(context, kind):
 def _refresh_ctk_previews(context, force=False):
     global _PREVIEW_UPDATE_RUNNING
 
-    if _PREVIEW_UPDATE_RUNNING or context is None or getattr(context.scene, "curve_toolkit", None) is None:
+    if (
+        _PREVIEW_UPDATE_RUNNING
+        or not _preview_objects_available()
+        or context is None
+        or getattr(context.scene, "curve_toolkit", None) is None
+    ):
         return
 
     settings = context.scene.curve_toolkit
@@ -6115,26 +6120,31 @@ classes = (
 )
 
 
+def _remove_handler_by_name(handler_list, handler_name):
+    for handler in list(handler_list):
+        if getattr(handler, "__name__", "") == handler_name:
+            handler_list.remove(handler)
+
+
+def _remove_ctk_handlers():
+    _remove_handler_by_name(bpy.app.handlers.depsgraph_update_post, "_ctk_curve_lock_handler")
+    _remove_handler_by_name(bpy.app.handlers.depsgraph_update_post, "_ctk_preview_refresh_handler")
+    _remove_handler_by_name(bpy.app.handlers.save_pre, "_ctk_clear_preview_save_handler")
+
+
 def register():
+    _remove_ctk_handlers()
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.curve_toolkit = PointerProperty(type=CTK_PG_settings)
-    if _ctk_curve_lock_handler not in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.append(_ctk_curve_lock_handler)
-    if _ctk_preview_refresh_handler not in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.append(_ctk_preview_refresh_handler)
-    if _ctk_clear_preview_save_handler not in bpy.app.handlers.save_pre:
-        bpy.app.handlers.save_pre.append(_ctk_clear_preview_save_handler)
+    bpy.app.handlers.depsgraph_update_post.append(_ctk_curve_lock_handler)
+    bpy.app.handlers.depsgraph_update_post.append(_ctk_preview_refresh_handler)
+    bpy.app.handlers.save_pre.append(_ctk_clear_preview_save_handler)
 
 
 def unregister():
     _clear_ctk_previews()
-    if _ctk_curve_lock_handler in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.remove(_ctk_curve_lock_handler)
-    if _ctk_preview_refresh_handler in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.remove(_ctk_preview_refresh_handler)
-    if _ctk_clear_preview_save_handler in bpy.app.handlers.save_pre:
-        bpy.app.handlers.save_pre.remove(_ctk_clear_preview_save_handler)
+    _remove_ctk_handlers()
     if hasattr(bpy.types.Scene, "curve_toolkit"):
         del bpy.types.Scene.curve_toolkit
     for cls in reversed(classes):
