@@ -143,20 +143,6 @@ Caps buttons show the current cap state in the panel.
 - `Export Mesh Copy`: creates evaluated mesh copies of selected curves in a separate collection without deleting or converting the originals.
 - `Curves Object to Curve`: converts an active Blender Curves object into a legacy Curve object so the toolkit can edit it.
 
-## Bone Control
-
-`Bone Control` applies the same visual path sampling to existing armatures. Keep the curve as the active object, select the target armature too, and select a linear connected bone chain before running these tools.
-
-- `Preview`: shows a temporary ghost armature for the selected bone chain. It does not change the original armature until an apply button is pressed.
-- `Clear Preview`: removes the ghost bone preview.
-- `Distribution`: chooses `Evenly` or `Curve` for generated custom bones and selected bone chains.
-- `Curvature Bias`: controls how strongly `Curve` distribution concentrates joints in curved areas.
-- `Apply Bone Distribution`: repositions the selected bone chain onto the active drawn curve without adding bones.
-- `Subdivide Cuts`: controls how many new bones are inserted into each selected bone.
-- `Subdivide Selected Bones`: subdivides the selected chain, then resamples the result onto the active drawn curve immediately.
-
-Preview is off by default so normal selection or transform work does not create any automatic visual changes. When preview is enabled, selection and setting changes rebuild only the ghost object. Pressing an apply button commits the current result to the original object and clears the ghost.
-
 ## Rigging
 
 `Generate Bones From Active Curve` creates a new armature in the same collection as the curve. Each spline with at least two usable control points becomes one connected bone chain.
@@ -187,3 +173,17 @@ For a single spline, the first bone uses the curve object name. Child bones appe
 For multiple splines, each chain gets a stable spline suffix before the bone number, for example `Curve_spline.001`.
 
 Supported curve primitives: Bezier, Circle, NURBS Curve, NURBS Circle, and Path.
+
+## Bone Control
+
+`Bone Control` applies the same visual path sampling to existing armatures. Keep the curve as the active object, select the target armature too, and select a linear connected bone chain before running these tools.
+
+- `Preview`: shows a temporary ghost armature for the selected bone chain. It does not change the original armature until an apply button is pressed.
+- `Clear Preview`: removes the ghost bone preview.
+- `Distribution`: chooses `Evenly` or `Curve` for generated custom bones and selected bone chains.
+- `Curvature Bias`: controls how strongly `Curve` distribution concentrates joints in curved areas.
+- `Apply Bone Distribution`: repositions the selected bone chain onto the active drawn curve without adding bones.
+- `Subdivide Cuts`: controls how many new bones are inserted into each selected bone.
+- `Subdivide Selected Bones`: subdivides the selected chain, then resamples the result onto the active drawn curve immediately.
+
+Preview is off by default so normal selection or transform work does not create any automatic visual changes. When preview is enabled, selection and setting changes rebuild only the ghost object. Pressing an apply button commits the current result to the original object and clears the ghost.

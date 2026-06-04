@@ -6022,26 +6022,6 @@ class CTK_PT_tools(bpy.types.Panel):
             convert_box.operator(CTK_OT_convert_curves_to_mesh.bl_idname)
             convert_box.operator(CTK_OT_convert_curves_object_to_curve.bl_idname)
 
-        bone_control_box = layout.box()
-        if self._draw_foldout(bone_control_box, settings, "show_bone_control", "Bone Control", "ARMATURE_DATA"):
-            row = bone_control_box.row(align=True)
-            row.prop(settings, "bone_preview_enabled")
-            op = row.operator(CTK_OT_clear_preview.bl_idname, text="Clear Preview")
-            op.kind = "BONE"
-
-            bone_control_box.prop(settings, "rig_distribution_mode")
-            bias_row = bone_control_box.row(align=True)
-            bias_row.enabled = settings.rig_distribution_mode == "CURVE"
-            bias_row.prop(settings, "rig_curvature_bias", slider=True)
-
-            bone_control_column = bone_control_box.column(align=True)
-            bone_control_column.enabled = curve_obj is not None and target_armature_obj is not None
-            bone_control_column.operator(CTK_OT_apply_bone_distribution.bl_idname)
-            bone_control_box.prop(settings, "rig_subdivide_cuts")
-            bone_control_column = bone_control_box.column(align=True)
-            bone_control_column.enabled = curve_obj is not None and target_armature_obj is not None
-            bone_control_column.operator(CTK_OT_subdivide_selected_bones.bl_idname)
-
         rigging_box = layout.box()
         if self._draw_foldout(rigging_box, settings, "show_rigging", "Rigging", "ARMATURE_DATA"):
             rigging_box.label(text="From Control Points")
@@ -6078,6 +6058,26 @@ class CTK_PT_tools(bpy.types.Panel):
             row = rigging_box.row(align=True)
             row.operator(CTK_OT_bind_hooks_to_armature.bl_idname)
             row.operator(CTK_OT_clear_hook_modifiers.bl_idname)
+
+        bone_control_box = layout.box()
+        if self._draw_foldout(bone_control_box, settings, "show_bone_control", "Bone Control", "ARMATURE_DATA"):
+            row = bone_control_box.row(align=True)
+            row.prop(settings, "bone_preview_enabled")
+            op = row.operator(CTK_OT_clear_preview.bl_idname, text="Clear Preview")
+            op.kind = "BONE"
+
+            bone_control_box.prop(settings, "rig_distribution_mode")
+            bias_row = bone_control_box.row(align=True)
+            bias_row.enabled = settings.rig_distribution_mode == "CURVE"
+            bias_row.prop(settings, "rig_curvature_bias", slider=True)
+
+            bone_control_column = bone_control_box.column(align=True)
+            bone_control_column.enabled = curve_obj is not None and target_armature_obj is not None
+            bone_control_column.operator(CTK_OT_apply_bone_distribution.bl_idname)
+            bone_control_box.prop(settings, "rig_subdivide_cuts")
+            bone_control_column = bone_control_box.column(align=True)
+            bone_control_column.enabled = curve_obj is not None and target_armature_obj is not None
+            bone_control_column.operator(CTK_OT_subdivide_selected_bones.bl_idname)
 
 
 classes = (
