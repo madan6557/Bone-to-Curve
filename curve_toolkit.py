@@ -2855,7 +2855,14 @@ def _restore_view_state(context, state):
                 pass
 
 
+def _preview_objects_available():
+    return hasattr(bpy.data, "objects")
+
+
 def _clear_ctk_previews(kind=None):
+    if not _preview_objects_available():
+        return
+
     for obj in list(bpy.data.objects):
         if not bool(obj.get(CTK_PREVIEW_KEY, False)):
             continue
@@ -2873,6 +2880,9 @@ def _clear_ctk_previews(kind=None):
 
 
 def _has_ctk_preview(kind=None):
+    if not _preview_objects_available():
+        return False
+
     return any(
         bool(obj.get(CTK_PREVIEW_KEY, False))
         and (kind is None or obj.get(CTK_PREVIEW_KIND_KEY, "") == kind)
@@ -6106,7 +6116,6 @@ classes = (
 
 
 def register():
-    _clear_ctk_previews()
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.curve_toolkit = PointerProperty(type=CTK_PG_settings)
