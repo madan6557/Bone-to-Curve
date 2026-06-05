@@ -12,7 +12,7 @@ bl_info = {
 }
 
 import json
-from math import pi
+from math import ceil, pi
 
 import bpy
 from bpy.app.handlers import persistent
@@ -1295,6 +1295,132 @@ def _rational_nurbs_basis_values(point_count, degree, knots, weights, parameter)
     return [value / total for value in weighted]
 
 
+def _nurbs_knot_span(knots, point_count, degree, parameter):
+    n = point_count - 1
+    if parameter >= knots[n + 1]:
+        return n
+    if parameter <= knots[degree]:
+        return degree
+
+    low = degree
+    high = n + 1
+    middle = (low + high) // 2
+    while parameter < knots[middle] or parameter >= knots[middle + 1]:
+        if parameter < knots[middle]:
+            high = middle
+        else:
+            low = middle
+        middle = (low + high) // 2
+    return middle
+
+
+def _knot_multiplicity(knots, parameter, tolerance=1.0e-7):
+    return sum(1 for knot in knots if abs(knot - parameter) <= tolerance)
+
+
+def _nurbs_state_from_point(point):
+    weight = max(MIN_BONE_LENGTH, float(point.co[3]))
+    return {
+        "homogeneous": Vector((point.co[0] * weight, point.co[1] * weight, point.co[2] * weight, weight)),
+        "radius": _point_radius(point),
+        "tilt": _point_tilt(point),
+        "weight_softbody": getattr(point, "weight_softbody", 0.0),
+        "select": bool(point.select),
+    }
+
+
+def _blend_nurbs_states(first, second, alpha):
+    return {
+        "homogeneous": first["homogeneous"] * (1.0 - alpha) + second["homogeneous"] * alpha,
+        "radius": first["radius"] * (1.0 - alpha) + second["radius"] * alpha,
+        "tilt": first["tilt"] * (1.0 - alpha) + second["tilt"] * alpha,
+        "weight_softbody": first["weight_softbody"] * (1.0 - alpha) + second["weight_softbody"] * alpha,
+        "select": first["select"] or second["select"],
+    }
+
+
+def _insert_nurbs_knot_once(states, knots, degree, parameter):
+    point_count = len(states)
+    span_index = _nurbs_knot_span(knots, point_count, degree, parameter)
+    multiplicity = _knot_multiplicity(knots, parameter)
+    if multiplicity >= degree:
+        return states, knots, False
+
+    new_states = [None] * (point_count + 1)
+    for index in range(0, span_index - degree + 1):
+        new_states[index] = states[index]
+    for index in range(span_index - multiplicity, point_count):
+        new_states[index + 1] = states[index]
+    for index in range(span_index - degree + 1, span_index - multiplicity + 1):
+        denominator = knots[index + degree] - knots[index]
+        alpha = 0.0 if abs(denominator) <= MIN_BONE_LENGTH else (parameter - knots[index]) / denominator
+        new_states[index] = _blend_nurbs_states(states[index - 1], states[index], max(0.0, min(1.0, alpha)))
+
+    new_knots = knots[:span_index + 1] + [parameter] + knots[span_index + 1:]
+    return new_states, new_knots, True
+
+
+def _uniform_refinement_knots(current_span_count, target_span_count):
+    missing_knots = []
+    for knot_index in range(1, target_span_count):
+        if (knot_index * current_span_count) % target_span_count == 0:
+            continue
+        missing_knots.append(knot_index / target_span_count)
+    return missing_knots
+
+
+def _set_nurbs_spline_states(spline, states):
+    points = spline.points
+    if len(states) > len(points):
+        points.add(len(states) - len(points))
+
+    for point, state in zip(points, states):
+        homogeneous = state["homogeneous"]
+        weight = max(MIN_BONE_LENGTH, homogeneous[3])
+        point.co = (homogeneous[0] / weight, homogeneous[1] / weight, homogeneous[2] / weight, weight)
+        _set_point_radius(point, state["radius"])
+        _set_point_tilt(point, state["tilt"])
+        if hasattr(point, "weight_softbody"):
+            point.weight_softbody = state["weight_softbody"]
+        point.select = state["select"]
+
+
+def _refine_nurbs_spline_uniform(spline, target_span_count, selected=True):
+    if spline.type != "NURBS" or _is_closed_spline(spline) or not bool(getattr(spline, "use_endpoint_u", False)):
+        return 0
+
+    point_count = _control_point_count(spline)
+    order = max(2, min(int(getattr(spline, "order_u", 2)), point_count))
+    degree = order - 1
+    current_span_count = point_count - degree
+    if current_span_count < 1 or target_span_count <= current_span_count:
+        return 0
+    if target_span_count % current_span_count != 0:
+        return 0
+
+    knots = _nurbs_knot_vector(point_count, degree, True)
+    if knots is None:
+        return 0
+
+    states = [_nurbs_state_from_point(point) for point in spline.points]
+    for state in states:
+        state["select"] = bool(selected)
+
+    inserted_count = 0
+    for parameter in _uniform_refinement_knots(current_span_count, target_span_count):
+        states, knots, inserted = _insert_nurbs_knot_once(states, knots, degree, parameter)
+        if inserted:
+            inserted_count += 1
+
+    if inserted_count == 0:
+        return 0
+
+    _set_nurbs_spline_states(spline, states)
+    spline.order_u = order
+    spline.use_endpoint_u = True
+    return inserted_count
+
+
 def _solve_vector_linear_system(matrix_rows, targets):
     size = len(matrix_rows)
     if size == 0 or len(targets) != size:
@@ -1836,6 +1962,25 @@ def _curve_selection_runs_or_full(splines):
         runs_by_spline.append(runs)
 
     return selected_mode, runs_by_spline
+
+
+def _runs_cover_full_spline(spline, runs):
+    point_count = _control_point_count(spline)
+    return len(runs) == 1 and runs[0] == list(range(point_count))
+
+
+def _auto_nurbs_target_span_count(spline, cut_counts):
+    point_count = _control_point_count(spline)
+    order = max(2, min(int(getattr(spline, "order_u", 2)), point_count))
+    degree = order - 1
+    current_span_count = point_count - degree
+    if current_span_count < 1:
+        return 0
+
+    planned_point_count = point_count + sum(max(0, cuts) for cuts in cut_counts.values())
+    planned_span_count = max(current_span_count + 1, planned_point_count - degree)
+    refine_factor = max(2, ceil(planned_span_count / current_span_count))
+    return current_span_count * refine_factor
 
 
 def _segments_from_runs(runs):
@@ -4744,12 +4889,28 @@ class CTK_OT_segment_auto_subdivide(bpy.types.Operator):
         previous_mode = curve_obj.mode
         _set_active_only(context, curve_obj)
         added_count = 0
+        refined_nurbs_splines = set()
 
         try:
             if curve_obj.mode != "OBJECT":
                 bpy.ops.object.mode_set(mode="OBJECT")
 
             for spline_index in sorted(cuts_by_spline):
+                spline = curve_obj.data.splines[spline_index]
+                cut_counts = cuts_by_spline[spline_index]
+                runs = runs_by_spline[spline_index]
+                if spline.type == "NURBS" and _runs_cover_full_spline(spline, runs):
+                    target_span_count = _auto_nurbs_target_span_count(spline, cut_counts)
+                    order = max(2, min(int(getattr(spline, "order_u", 2)), _control_point_count(spline)))
+                    target_point_count = target_span_count + order - 1
+                    if target_point_count <= CTK_SEGMENT_PREVIEW_POINT_LIMIT:
+                        before_count = _control_point_count(spline)
+                        inserted_count = _refine_nurbs_spline_uniform(spline, target_span_count, selected=True)
+                        if inserted_count:
+                            added_count += max(0, _control_point_count(spline) - before_count)
+                            refined_nurbs_splines.add(spline_index)
+                            continue
+
                 for segment_index, cuts in sorted(cuts_by_spline[spline_index].items(), reverse=True):
                     _set_curve_point_selection(curve_obj, selected=False)
                     spline = curve_obj.data.splines[spline_index]
@@ -4779,8 +4940,15 @@ class CTK_OT_segment_auto_subdivide(bpy.types.Operator):
 
             context.view_layer.update()
             _set_curve_point_selection(curve_obj, selected=False)
+            for spline_index in refined_nurbs_splines:
+                if spline_index >= len(curve_obj.data.splines):
+                    continue
+                spline = curve_obj.data.splines[spline_index]
+                _select_spline_index_range(spline, 0, _control_point_count(spline) - 1, selected=True)
 
             for spline_index, path_points in path_snapshots.items():
+                if spline_index in refined_nurbs_splines:
+                    continue
                 if spline_index >= len(curve_obj.data.splines):
                     continue
 

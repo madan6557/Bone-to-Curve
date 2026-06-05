@@ -48,7 +48,7 @@ Subdivide:
 Auto:
 
 - `Auto Detail`: controls how aggressively automatic subdivision adds cuts in curved areas.
-- `Auto Subdivide`: detects curvature and chord deviation, inserts cuts only where needed, then applies curve distribution from the pre-subdivide visual path.
+- `Auto Subdivide`: detects curvature and chord deviation, inserts cuts only where needed, then applies a safe preserve pass. Full NURBS splines use uniform knot refinement so bevel surfaces keep their original shape much more reliably.
 
 Fit:
 
