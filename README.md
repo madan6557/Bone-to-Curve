@@ -31,30 +31,30 @@ Closed curve splines are protected from destructive edit operations.
 
 ## Segment Control
 
-`Preview` shows a temporary ghost curve for selected points only. It does not change the original curve until an apply button is pressed. `Clear Preview` removes the ghost preview.
+`Preview` shows a temporary ghost curve for selected points only. It does not change the original curve until an apply button is pressed. Preview refresh is debounced and skipped when the generated ghost would exceed the safe point cap, so heavy settings do not lock Blender. `Clear Preview` removes the ghost preview.
 
 Raw Distribution:
 
 - `Distribution`: chooses `Evenly` or `Curve`.
 - `Curvature Bias`: controls how strongly `Curve` distribution concentrates points in curved areas. The slider is active only when `Curve` is selected.
-- `Apply Distribution`: redistributes control point placement along the current evaluated path using the selected distribution mode.
+- `Apply Distribution`: redistributes control point placement along the current evaluated path using shape-preserving sampling. Bezier handles follow evaluated tangents, and full NURBS splines use a safe interpolation fit when possible.
 
 Subdivide:
 
 - `Subdivide Cuts`: controls how many new points are inserted between each selected segment.
 - `Sub Distribution`: optionally redistributes the subdivided selection with `None`, `Evenly`, or `Curve`.
-- `Subdivide Selected`: inserts conventional cuts between selected points, then applies the chosen sub distribution when it is not `None`.
+- `Subdivide Selected`: inserts data-level cuts between selected points, then applies the chosen sub distribution when it is not `None`. Preview uses the same data path as Apply, not Blender's edit-mode subdivide operator.
 
 Auto:
 
 - `Auto Detail`: controls how aggressively automatic subdivision adds cuts in curved areas.
-- `Auto Subdivide`: detects the strongest curvature intervals, inserts cuts only where needed, then applies curve distribution from the pre-subdivide visual path.
+- `Auto Subdivide`: detects curvature and chord deviation, inserts cuts only where needed, then applies curve distribution from the pre-subdivide visual path.
 
 Fit:
 
 - `Fit To Visual Path`: moves the control path closer to the current evaluated visual path without changing point count.
 
-Distribution preview and apply require at least 2 contiguous selected points. `Subdivide Selected` also requires at least 2 contiguous selected points. `None` sub distribution keeps Blender's conventional subdivision. `Evenly` and `Curve` sub distribution redistribute the selected subdivided range after cuts are inserted. `Auto Subdivide` uses integrated curvature so low-curvature intervals receive few cuts or no cuts. `Fit To Visual Path` remains separate and can still process the whole open spline when no points are selected because it intentionally projects controls to their current evaluated positions and can change shape. Segment Control keeps object transforms, bevel references, caps, and materials stable.
+Distribution preview and apply require at least 2 contiguous selected points. `Subdivide Selected` also requires at least 2 contiguous selected points. `None` sub distribution keeps the cut operation minimal while using a NURBS safety refit for full selected splines when needed. `Evenly` and `Curve` sub distribution redistribute the selected subdivided range after cuts are inserted. `Auto Subdivide` uses integrated curvature and chord deviation so low-curvature intervals receive few cuts or no cuts. `Fit To Visual Path` remains separate and can still process the whole open spline when no points are selected because it intentionally projects controls to their current evaluated positions and can change shape. Segment Control keeps object transforms, bevel references, caps, and materials stable.
 
 ## Smooth / Reset
 
