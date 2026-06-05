@@ -1603,8 +1603,14 @@ def _apply_segment_distribution(context, curve_obj, spline, indices, mode, curva
     tilts = [_point_tilt(points[index]) for index in indices]
     target_positions = [_point_at_distance(path_points, target_distance) for target_distance in target_distances]
 
+    use_nurbs_interpolation = (
+        spline.type == "NURBS"
+        and mode != "FIT"
+        and _runs_cover_full_spline(spline, [indices])
+        and _control_point_count(spline) <= 12
+    )
     target_parameters = _normalized_parameters_from_distances(target_distances, _polyline_length(path_points))
-    if mode != "FIT" and _apply_nurbs_interpolated_positions(curve_obj, spline, indices, target_positions, target_parameters):
+    if use_nurbs_interpolation and _apply_nurbs_interpolated_positions(curve_obj, spline, indices, target_positions, target_parameters):
         pass
     else:
         for index, target_position in zip(indices, target_positions):
@@ -1780,6 +1786,29 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
     selected_runs = [run for run in _selected_index_runs(spline) if len(run) >= 2]
     if not selected_runs:
         return 0
+
+    if spline.type == "NURBS" and _runs_cover_full_spline(spline, selected_runs):
+        point_count = _control_point_count(spline)
+        order = max(2, min(int(getattr(spline, "order_u", 2)), point_count))
+        current_span_count = point_count - (order - 1)
+        inserted_count = _refine_nurbs_spline_uniform(spline, current_span_count * (cuts + 1), selected=True)
+        if inserted_count == 0:
+            return 0
+
+        if distribution_mode != "NONE":
+            run = list(range(_control_point_count(spline)))
+            path_points = _evaluated_spline_path_points(context, curve_obj, spline) if path_points is None else path_points
+            return inserted_count + _apply_segment_distribution(
+                context,
+                curve_obj,
+                spline,
+                run,
+                distribution_mode,
+                curvature_bias,
+                path_points,
+            )
+
+        return inserted_count
 
     if path_points is None:
         path_points = _evaluated_spline_path_points(context, curve_obj, spline)
@@ -4725,13 +4754,21 @@ class CTK_OT_segment_distribute(bpy.types.Operator):
         return _active_curve(context) is not None
 
     def execute(self, context):
-        curve_obj, splines = _require_editable_open_curve(self, context)
+        curve_obj, _splines = _require_editable_open_curve(self, context)
         if curve_obj is None:
             return {"CANCELLED"}
 
         settings = context.scene.curve_toolkit
+        previous_mode = curve_obj.mode
+        _set_active_only(context, curve_obj)
+        if curve_obj.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+
+        splines = _editable_splines(curve_obj)
         selected_mode = _has_selected_points(splines)
         if self.mode != "FIT" and not selected_mode:
+            if previous_mode != "OBJECT":
+                bpy.ops.object.mode_set(mode=previous_mode)
             self.report({"ERROR"}, "Select at least 2 contiguous curve points to distribute.")
             return {"CANCELLED"}
 
@@ -4751,10 +4788,15 @@ class CTK_OT_segment_distribute(bpy.types.Operator):
                 )
 
         if changed_count == 0:
+            if previous_mode != "OBJECT":
+                bpy.ops.object.mode_set(mode=previous_mode)
             self.report({"ERROR"}, "No valid open spline segment could be distributed.")
             return {"CANCELLED"}
 
         context.view_layer.update()
+        if previous_mode != "OBJECT":
+            bpy.ops.object.mode_set(mode=previous_mode)
+
         if self.mode != "FIT":
             _clear_ctk_previews("SEGMENT")
             _store_current_preview_signature(context, "SEGMENT")
@@ -4774,11 +4816,17 @@ class CTK_OT_segment_subdivide_selected(bpy.types.Operator):
         return _active_curve(context) is not None
 
     def execute(self, context):
-        curve_obj, splines = _require_editable_open_curve(self, context)
+        curve_obj, _splines = _require_editable_open_curve(self, context)
         if curve_obj is None:
             return {"CANCELLED"}
 
         settings = context.scene.curve_toolkit
+        previous_mode = curve_obj.mode
+        _set_active_only(context, curve_obj)
+        if curve_obj.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+
+        splines = _editable_splines(curve_obj)
         before_counts = [_control_point_count(spline) for spline in splines]
         has_valid_segment = False
 
@@ -4788,15 +4836,12 @@ class CTK_OT_segment_subdivide_selected(bpy.types.Operator):
                 has_valid_segment = True
 
         if not has_valid_segment:
+            if previous_mode != "OBJECT":
+                bpy.ops.object.mode_set(mode=previous_mode)
             self.report({"ERROR"}, "Select at least 2 contiguous curve points to subdivide.")
             return {"CANCELLED"}
 
-        previous_mode = curve_obj.mode
-        _set_active_only(context, curve_obj)
         try:
-            if curve_obj.mode != "OBJECT":
-                bpy.ops.object.mode_set(mode="OBJECT")
-
             for spline in splines:
                 if not any(len(run) >= 2 for run in _selected_index_runs(spline)):
                     continue

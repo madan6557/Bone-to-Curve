@@ -37,13 +37,13 @@ Raw Distribution:
 
 - `Distribution`: chooses `Evenly` or `Curve`.
 - `Curvature Bias`: controls how strongly `Curve` distribution concentrates points in curved areas. The slider is active only when `Curve` is selected.
-- `Apply Distribution`: redistributes control point placement along the current evaluated path using shape-preserving sampling. Bezier handles follow evaluated tangents, and full NURBS splines use a safe interpolation fit when possible.
+- `Apply Distribution`: redistributes control point placement along the current evaluated path using shape-preserving sampling. Bezier handles follow evaluated tangents, small full NURBS splines use a safe interpolation fit, and high-density NURBS uses direct path samples to avoid folded control polygons.
 
 Subdivide:
 
 - `Subdivide Cuts`: controls how many new points are inserted between each selected segment.
 - `Sub Distribution`: optionally redistributes the subdivided selection with `None`, `Evenly`, or `Curve`.
-- `Subdivide Selected`: inserts data-level cuts between selected points, then applies the chosen sub distribution when it is not `None`. Preview uses the same data path as Apply, not Blender's edit-mode subdivide operator.
+- `Subdivide Selected`: inserts data-level cuts between selected points, then applies the chosen sub distribution when it is not `None`. Full NURBS splines use knot refinement for safer shape preservation. Preview uses the same data path as Apply, not Blender's edit-mode subdivide operator.
 
 Auto:
 
