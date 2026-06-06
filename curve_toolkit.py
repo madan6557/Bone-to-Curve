@@ -69,25 +69,36 @@ def _unique_name(base_name, existing_names):
         index += 1
 
 
-def _mirror_side_name(name):
-    replacements = (
-        (".L", ".R"),
-        (".R", ".L"),
-        ("_L", "_R"),
-        ("_R", "_L"),
-        ("-L", "-R"),
-        ("-R", "-L"),
-        ("Left", "Right"),
-        ("Right", "Left"),
-        ("left", "right"),
-        ("right", "left"),
-    )
+MIRROR_SIDE_REPLACEMENTS = (
+    (".L", ".R"),
+    (".R", ".L"),
+    ("_L", "_R"),
+    ("_R", "_L"),
+    ("-L", "-R"),
+    ("-R", "-L"),
+    ("Left", "Right"),
+    ("Right", "Left"),
+    ("left", "right"),
+    ("right", "left"),
+)
 
-    for source, target in replacements:
+
+def _has_mirror_side_token(name):
+    return any(source in name for source, _target in MIRROR_SIDE_REPLACEMENTS)
+
+
+def _mirror_side_name(name):
+    for source, target in MIRROR_SIDE_REPLACEMENTS:
         if source in name:
             return name.replace(source, target)
 
-    return f"{name}_mirror"
+    return f"{name}.R"
+
+
+def _ensure_left_side_name(name, existing_names):
+    if _has_mirror_side_token(name):
+        return name
+    return _unique_name(f"{name}.L", existing_names)
 
 
 def _control_point_count(spline):
@@ -2799,6 +2810,9 @@ def _mirror_curve_data_x(source_obj, target_obj):
 
 
 def _duplicate_mirror_curve(context, source_obj):
+    source_obj.name = _ensure_left_side_name(source_obj.name, bpy.data.objects.keys())
+    source_obj.data.name = _ensure_left_side_name(source_obj.data.name, bpy.data.curves.keys())
+
     mirrored_name = _unique_name(_mirror_side_name(source_obj.name), bpy.data.objects.keys())
     mirrored_data_name = _unique_name(_mirror_side_name(source_obj.data.name), bpy.data.curves.keys())
 
