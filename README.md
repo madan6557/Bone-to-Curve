@@ -110,10 +110,22 @@ Distribution preview and apply require at least 2 contiguous selected points. `S
 `Root`, `Tip`, and `Ends` close curve geometry caps without changing point radius scale. `Open Caps` disables cap filling.
 Caps buttons show the current cap state in the panel.
 
-## Resolution Batch
+## Collection Manager
+
+Collections:
 
 - `Add Collection`: chooses a collection and registers it with the add button. Child collections are included.
 - Registered collections can be removed from the list with the remove button.
+
+Collection Control:
+
+- `Object Type`: filters batch rename targets by `All`, `Curve`, `Mesh`, or `Armature`.
+- `Prefix`, `Base Name`, and `Suffix`: define the generated object name.
+- `Start Number` and `Padding`: define the sequence number. Example: `Hair_001`.
+- `Batch Rename Objects`: renames objects in registered collections recursively. Objects found through multiple collections are renamed once. Only object names are changed, not shared data-block names.
+
+Resolution Control:
+
 - `Paths` and `Bevel Refs`: show how many path curves and bevel reference curves are currently detected.
 - `Path Resolution`: live updates `resolution_u` and `render_resolution_u` for every detected path curve.
 - `Bevel Reference Resolution`: live updates `resolution_u` and `render_resolution_u` for every unique curve used as a path bevel object.
@@ -121,7 +133,7 @@ Caps buttons show the current cap state in the panel.
 
 ## LOD Tools
 
-`Draft`, `Work`, and `Final` apply path resolution, bevel reference resolution, and cap presets to selected curves. If no curves are selected, they use Resolution Batch collections.
+`Draft`, `Work`, and `Final` apply path resolution, bevel reference resolution, and cap presets to selected curves. If no curves are selected, they use Collection Manager collections.
 
 ## Selection Tools
 

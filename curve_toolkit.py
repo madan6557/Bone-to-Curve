@@ -2601,6 +2601,29 @@ def _resolution_batch_targets_from_settings(settings):
     return _resolution_batch_targets_from_collections(_resolution_batch_collections(settings))
 
 
+def _collection_manager_targets(settings, object_type="ALL"):
+    collections = sorted(_resolution_batch_collections(settings), key=lambda collection: collection.name.lower())
+    if not collections:
+        return []
+
+    target_entries = []
+    seen_objects = set()
+    for collection in collections:
+        for obj in _collection_objects_recursive(collection):
+            if object_type != "ALL" and obj.type != object_type:
+                continue
+
+            object_key = obj.as_pointer()
+            if object_key in seen_objects:
+                continue
+
+            seen_objects.add(object_key)
+            target_entries.append((collection.name.lower(), obj.name.lower(), obj.name, obj))
+
+    target_entries.sort(key=lambda entry: (entry[0], entry[1], entry[2]))
+    return [entry[3] for entry in target_entries]
+
+
 def _set_curve_data_resolution(curve_obj, value):
     resolution = max(0, min(64, int(value)))
     if hasattr(curve_obj.data, "resolution_u"):
@@ -3866,7 +3889,7 @@ def _ctk_clear_preview_save_handler(_dummy):
 class CTK_PG_resolution_collection_item(bpy.types.PropertyGroup):
     collection: PointerProperty(
         name="Collection",
-        description="Collection included in Resolution Batch",
+        description="Collection included in Collection Manager",
         type=bpy.types.Collection,
     )
 
@@ -3881,7 +3904,7 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
     show_profile_tools: BoolProperty(name="Profile / Taper", default=True)
     show_bevel_manager: BoolProperty(name="Bevel Manager", default=True)
     show_caps: BoolProperty(name="Caps", default=True)
-    show_resolution_batch: BoolProperty(name="Resolution Batch", default=True)
+    show_resolution_batch: BoolProperty(name="Collection Manager", default=True)
     show_lod_tools: BoolProperty(name="LOD Tools", default=True)
     show_selection_tools: BoolProperty(name="Selection Tools", default=True)
     show_validation_tools: BoolProperty(name="Validation", default=True)
@@ -4103,14 +4126,60 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
 
     resolution_collection: PointerProperty(
         name="Add Collection",
-        description="Collection to add to Resolution Batch",
+        description="Collection to add to Collection Manager",
         type=bpy.types.Collection,
     )
 
     resolution_collections: CollectionProperty(
         name="Collections",
-        description="Collections included in Resolution Batch",
+        description="Collections included in Collection Manager",
         type=CTK_PG_resolution_collection_item,
+    )
+
+    collection_rename_prefix: StringProperty(
+        name="Prefix",
+        description="Text added before the generated object name",
+        default="",
+    )
+
+    collection_rename_base_name: StringProperty(
+        name="Base Name",
+        description="Base text used for batch object renaming",
+        default="Object_",
+    )
+
+    collection_rename_suffix: StringProperty(
+        name="Suffix",
+        description="Text added after the generated object number",
+        default="",
+    )
+
+    collection_rename_start: IntProperty(
+        name="Start Number",
+        description="First sequence number used for batch object renaming",
+        default=1,
+        min=0,
+        max=999999,
+    )
+
+    collection_rename_padding: IntProperty(
+        name="Padding",
+        description="Digit padding used for batch object renaming",
+        default=3,
+        min=1,
+        max=8,
+    )
+
+    collection_rename_object_type: EnumProperty(
+        name="Object Type",
+        description="Object type filter used by Collection Control batch rename",
+        items=(
+            ("ALL", "All", "Rename all object types"),
+            ("CURVE", "Curve", "Rename curve objects only"),
+            ("MESH", "Mesh", "Rename mesh objects only"),
+            ("ARMATURE", "Armature", "Rename armature objects only"),
+        ),
+        default="ALL",
     )
 
     path_resolution: IntProperty(
@@ -5402,7 +5471,7 @@ class CTK_OT_set_fill_caps(bpy.types.Operator):
 class CTK_OT_add_resolution_collection(bpy.types.Operator):
     bl_idname = "curve_toolkit.add_resolution_collection"
     bl_label = "Add Collection"
-    bl_description = "Add the selected collection to Resolution Batch"
+    bl_description = "Add the selected collection to Collection Manager"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -5422,14 +5491,14 @@ class CTK_OT_add_resolution_collection(bpy.types.Operator):
         item.collection = collection
         _apply_resolution_batch(settings, "PATH")
         _apply_resolution_batch(settings, "BEVEL")
-        self.report({"INFO"}, f"Added {collection.name} to Resolution Batch.")
+        self.report({"INFO"}, f"Added {collection.name} to Collection Manager.")
         return {"FINISHED"}
 
 
 class CTK_OT_remove_resolution_collection(bpy.types.Operator):
     bl_idname = "curve_toolkit.remove_resolution_collection"
     bl_label = "Remove Collection"
-    bl_description = "Remove a collection from Resolution Batch"
+    bl_description = "Remove a collection from Collection Manager"
     bl_options = {"REGISTER", "UNDO"}
 
     index: IntProperty(name="Index", default=-1)
@@ -5437,34 +5506,71 @@ class CTK_OT_remove_resolution_collection(bpy.types.Operator):
     def execute(self, context):
         settings = context.scene.curve_toolkit
         if self.index < 0 or self.index >= len(settings.resolution_collections):
-            self.report({"ERROR"}, "Invalid Resolution Batch collection index.")
+            self.report({"ERROR"}, "Invalid Collection Manager collection index.")
             return {"CANCELLED"}
 
         item = settings.resolution_collections[self.index]
         collection_name = item.collection.name if item.collection is not None else "Missing Collection"
         settings.resolution_collections.remove(self.index)
-        self.report({"INFO"}, f"Removed {collection_name} from Resolution Batch.")
+        self.report({"INFO"}, f"Removed {collection_name} from Collection Manager.")
         return {"FINISHED"}
 
 
 class CTK_OT_refresh_resolution_batch(bpy.types.Operator):
     bl_idname = "curve_toolkit.refresh_resolution_batch"
     bl_label = "Refresh"
-    bl_description = "Refresh Resolution Batch target counts"
+    bl_description = "Refresh Resolution Control target counts"
     bl_options = {"REGISTER"}
 
     def execute(self, context):
         settings = context.scene.curve_toolkit
         collections = _resolution_batch_collections(settings)
         if not collections:
-            self.report({"WARNING"}, "Add at least one collection for Resolution Batch.")
+            self.report({"WARNING"}, "Add at least one collection to Collection Manager.")
             return {"FINISHED"}
 
         path_curves, bevel_references = _resolution_batch_targets_from_collections(collections)
         self.report(
             {"INFO"},
-            f"Resolution Batch found {len(path_curves)} path curves and {len(bevel_references)} bevel references from {len(collections)} collections.",
+            f"Resolution Control found {len(path_curves)} path curves and {len(bevel_references)} bevel references from {len(collections)} collections.",
         )
+        return {"FINISHED"}
+
+
+class CTK_OT_rename_collection_objects(bpy.types.Operator):
+    bl_idname = "curve_toolkit.rename_collection_objects"
+    bl_label = "Batch Rename Objects"
+    bl_description = "Batch rename objects in Collection Manager collections"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        settings = context.scene.curve_toolkit
+        collections = _resolution_batch_collections(settings)
+        if not collections:
+            self.report({"ERROR"}, "Add at least one collection to Collection Manager.")
+            return {"CANCELLED"}
+
+        targets = _collection_manager_targets(settings, settings.collection_rename_object_type)
+        if not targets:
+            self.report({"ERROR"}, "No matching objects found in Collection Manager collections.")
+            return {"CANCELLED"}
+
+        prefix = settings.collection_rename_prefix
+        base_name = settings.collection_rename_base_name
+        suffix = settings.collection_rename_suffix
+        start_number = settings.collection_rename_start
+        padding = max(1, settings.collection_rename_padding)
+        temporary_prefix = "__CTK_RENAME__"
+
+        for index, obj in enumerate(targets):
+            obj.name = f"{temporary_prefix}{index:06d}"
+
+        for index, obj in enumerate(targets):
+            number = str(start_number + index).zfill(padding)
+            obj.name = f"{prefix}{base_name}{number}{suffix}"
+
+        context.view_layer.update()
+        self.report({"INFO"}, f"Renamed {len(targets)} objects.")
         return {"FINISHED"}
 
 
@@ -6489,27 +6595,42 @@ class CTK_PT_tools(bpy.types.Panel):
             caps_box.operator(CTK_OT_set_fill_caps.bl_idname, text="Open Caps", depress=caps_open).mode = "OPEN"
 
         resolution_box = layout.box()
-        if self._draw_foldout(resolution_box, settings, "show_resolution_batch", "Resolution Batch", "OUTLINER_COLLECTION"):
-            row = resolution_box.row(align=True)
+        if self._draw_foldout(resolution_box, settings, "show_resolution_batch", "Collection Manager", "OUTLINER_COLLECTION"):
+            collections_box = resolution_box.box()
+            collections_box.label(text="Collections")
+            row = collections_box.row(align=True)
             row.prop(settings, "resolution_collection")
             row.operator(CTK_OT_add_resolution_collection.bl_idname, text="", icon="ADD")
 
             collections = _resolution_batch_collections(settings)
             if settings.resolution_collections:
-                resolution_box.label(text=f"Collections: {len(collections)}")
+                collections_box.label(text=f"Registered: {len(collections)}")
                 for index, item in enumerate(settings.resolution_collections):
-                    row = resolution_box.row(align=True)
+                    row = collections_box.row(align=True)
                     row.label(text=item.collection.name if item.collection is not None else "Missing Collection")
                     op = row.operator(CTK_OT_remove_resolution_collection.bl_idname, text="", icon="X")
                     op.index = index
             else:
-                resolution_box.label(text=f"Collections: {len(collections)}")
+                collections_box.label(text=f"Registered: {len(collections)}")
 
+            collection_control_box = resolution_box.box()
+            collection_control_box.label(text="Collection Control")
+            collection_control_box.prop(settings, "collection_rename_object_type")
+            collection_control_box.prop(settings, "collection_rename_prefix")
+            collection_control_box.prop(settings, "collection_rename_base_name")
+            collection_control_box.prop(settings, "collection_rename_suffix")
+            row = collection_control_box.row(align=True)
+            row.prop(settings, "collection_rename_start")
+            row.prop(settings, "collection_rename_padding")
+            collection_control_box.operator(CTK_OT_rename_collection_objects.bl_idname)
+
+            resolution_control_box = resolution_box.box()
+            resolution_control_box.label(text="Resolution Control")
             path_curves, bevel_references = _resolution_batch_targets_from_collections(collections)
-            resolution_box.label(text=f"Paths: {len(path_curves)}  Bevel Refs: {len(bevel_references)}")
-            resolution_box.prop(settings, "path_resolution")
-            resolution_box.prop(settings, "bevel_reference_resolution")
-            resolution_box.operator(CTK_OT_refresh_resolution_batch.bl_idname)
+            resolution_control_box.label(text=f"Paths: {len(path_curves)}  Bevel Refs: {len(bevel_references)}")
+            resolution_control_box.prop(settings, "path_resolution")
+            resolution_control_box.prop(settings, "bevel_reference_resolution")
+            resolution_control_box.operator(CTK_OT_refresh_resolution_batch.bl_idname)
 
         lod_box = layout.box()
         if self._draw_foldout(lod_box, settings, "show_lod_tools", "LOD Tools", "SETTINGS"):
@@ -6669,6 +6790,7 @@ classes = (
     CTK_OT_add_resolution_collection,
     CTK_OT_remove_resolution_collection,
     CTK_OT_refresh_resolution_batch,
+    CTK_OT_rename_collection_objects,
     CTK_PT_tools,
 )
 
