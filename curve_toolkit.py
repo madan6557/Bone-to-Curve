@@ -2777,15 +2777,20 @@ def _ctk_curve_lock_handler(_scene, _depsgraph):
         _CURVE_LOCK_HANDLER_RUNNING = False
 
 
-def _mirror_matrix_world_x(matrix, center_x=0.0):
+def _mirror_axis_index(axis):
+    return {"X": 0, "Y": 1, "Z": 2}.get(axis, 0)
+
+
+def _mirror_matrix_world_axis(matrix, axis="X", center=0.0):
+    axis_index = _mirror_axis_index(axis)
     mirrored = matrix.copy()
     for column in range(4):
-        mirrored[0][column] *= -1.0
-    mirrored[0][3] += center_x * 2.0
+        mirrored[axis_index][column] *= -1.0
+    mirrored[axis_index][3] += center * 2.0
     return mirrored
 
 
-def _duplicate_mirror_curve(context, source_obj):
+def _duplicate_mirror_curve(context, source_obj, axis="X"):
     source_obj.name = _ensure_left_side_name(source_obj.name, bpy.data.objects.keys())
     source_obj.data.name = _ensure_left_side_name(source_obj.data.name, bpy.data.curves.keys())
 
@@ -2799,7 +2804,7 @@ def _duplicate_mirror_curve(context, source_obj):
     target_obj.data = target_data
     target_obj.animation_data_clear()
     target_obj.name = mirrored_name
-    target_obj.matrix_world = _mirror_matrix_world_x(source_obj.matrix_world)
+    target_obj.matrix_world = _mirror_matrix_world_axis(source_obj.matrix_world, axis)
 
     target_collection = _link_target_collection(context, source_obj)
     target_collection.objects.link(target_obj)
@@ -3902,6 +3907,17 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
     show_convert_tools: BoolProperty(name="Convert / Bridge", default=True)
     show_bone_control: BoolProperty(name="Bone Control", default=True)
     show_rigging: BoolProperty(name="Rigging", default=True)
+
+    mirror_axis: EnumProperty(
+        name="Mirror Axis",
+        description="Global axis used as the mirror plane center",
+        items=(
+            ("X", "X", "Mirror across global X center"),
+            ("Y", "Y", "Mirror across global Y center"),
+            ("Z", "Z", "Mirror across global Z center"),
+        ),
+        default="X",
+    )
 
     smooth_factor: FloatProperty(
         name="Factor",
@@ -5378,7 +5394,7 @@ class CTK_OT_set_endpoint_lock(bpy.types.Operator):
 class CTK_OT_duplicate_mirror_selected_curves(bpy.types.Operator):
     bl_idname = "curve_toolkit.duplicate_mirror_selected_curves"
     bl_label = "Duplicate Mirror"
-    bl_description = "Duplicate selected curves and mirror them across global X center"
+    bl_description = "Duplicate selected curves and mirror them across the selected global axis center"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -5392,9 +5408,10 @@ class CTK_OT_duplicate_mirror_selected_curves(bpy.types.Operator):
             return {"CANCELLED"}
 
         context.view_layer.update()
+        settings = context.scene.curve_toolkit
         mirrored_objects = []
         for source_obj in source_curves:
-            mirrored_objects.append(_duplicate_mirror_curve(context, source_obj))
+            mirrored_objects.append(_duplicate_mirror_curve(context, source_obj, settings.mirror_axis))
 
         for obj in context.selected_objects:
             obj.select_set(False)
@@ -5403,7 +5420,7 @@ class CTK_OT_duplicate_mirror_selected_curves(bpy.types.Operator):
 
         context.view_layer.objects.active = mirrored_objects[-1]
         context.view_layer.update()
-        self.report({"INFO"}, f"Created {len(mirrored_objects)} mirrored curve duplicates.")
+        self.report({"INFO"}, f"Created {len(mirrored_objects)} mirrored curve duplicates across {settings.mirror_axis}.")
         return {"FINISHED"}
 
 
@@ -6660,6 +6677,7 @@ class CTK_PT_tools(bpy.types.Panel):
 
         mirror_box = layout.box()
         if self._draw_foldout(mirror_box, settings, "show_mirror", "Mirror", "MOD_MIRROR"):
+            mirror_box.prop(settings, "mirror_axis")
             mirror_box.operator(CTK_OT_duplicate_mirror_selected_curves.bl_idname)
 
         convert_box = layout.box()
