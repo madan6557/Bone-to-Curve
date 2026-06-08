@@ -2783,30 +2783,79 @@ def _mirror_world_point_x(point, center_x=0.0):
     return mirrored
 
 
-def _mirror_point_to_object(source_obj, target_obj, point, spline):
-    world_point = source_obj.matrix_world @ _point_local_co(point, spline)
-    _set_point_local_co(point, spline, target_obj.matrix_world.inverted() @ _mirror_world_point_x(world_point))
+def _mirror_world_vector_x(vector):
+    mirrored = vector.copy()
+    mirrored.x = -mirrored.x
+    return mirrored
 
 
-def _mirror_bezier_handles_to_object(source_obj, target_obj, point):
+def _mirror_point_to_object(source_obj, target_obj, source_point, target_point, source_spline, target_spline):
+    world_point = source_obj.matrix_world @ _point_local_co(source_point, source_spline)
+    target_position = target_obj.matrix_world.inverted() @ _mirror_world_point_x(world_point)
+    _set_point_local_co(target_point, target_spline, target_position)
+
+
+def _mirror_bezier_handles_to_object(source_obj, target_obj, source_point, target_point):
     target_matrix_inverted = target_obj.matrix_world.inverted()
-    left_world = source_obj.matrix_world @ point.handle_left
-    right_world = source_obj.matrix_world @ point.handle_right
-    point.handle_left = target_matrix_inverted @ _mirror_world_point_x(left_world)
-    point.handle_right = target_matrix_inverted @ _mirror_world_point_x(right_world)
+    left_world = source_obj.matrix_world @ source_point.handle_left
+    right_world = source_obj.matrix_world @ source_point.handle_right
+    target_point.handle_left = target_matrix_inverted @ _mirror_world_point_x(left_world)
+    target_point.handle_right = target_matrix_inverted @ _mirror_world_point_x(right_world)
+
+
+def _mirror_spline_tilts_to_object(source_obj, target_obj, source_spline, target_spline):
+    source_points = list(_spline_points(source_spline))
+    target_points = list(_spline_points(target_spline))
+    if len(source_points) != len(target_points):
+        return
+
+    if len(source_points) < 2:
+        for source_point, target_point in zip(source_points, target_points):
+            _set_point_tilt(target_point, pi - _point_tilt(source_point))
+        return
+
+    source_positions = [_point_world_co(source_obj, source_spline, point) for point in source_points]
+    target_positions = [_point_world_co(target_obj, target_spline, point) for point in target_points]
+    if not _has_valid_segment(source_positions) or not _has_valid_segment(target_positions):
+        for source_point, target_point in zip(source_points, target_points):
+            _set_point_tilt(target_point, pi - _point_tilt(source_point))
+        return
+
+    source_tangents = _path_tangents(source_positions)
+    target_tangents = _path_tangents(target_positions)
+    source_base_normals = _base_normals_for_twist_mode(source_obj, source_tangents)
+    target_base_normals = _base_normals_for_twist_mode(target_obj, target_tangents)
+
+    for source_point, target_point, source_tangent, target_tangent, source_base, target_base in zip(
+        source_points,
+        target_points,
+        source_tangents,
+        target_tangents,
+        source_base_normals,
+        target_base_normals,
+    ):
+        source_visual_normal = _visual_normal_from_tilt(source_base, source_tangent, _point_tilt(source_point))
+        mirrored_visual_normal = _mirror_world_vector_x(source_visual_normal)
+        target_visual_normal = _project_normal(-mirrored_visual_normal, target_tangent)
+        target_tilt = _signed_angle_around_axis(target_base, target_visual_normal, target_tangent)
+        _set_point_tilt(target_point, target_tilt)
 
 
 def _mirror_curve_data_x(source_obj, target_obj):
-    for spline in target_obj.data.splines:
+    for source_spline, target_spline in zip(source_obj.data.splines, target_obj.data.splines):
+        spline = target_spline
         if not _is_supported_spline(spline):
             continue
 
-        for point in _spline_points(spline):
-            _mirror_point_to_object(source_obj, target_obj, point, spline)
-            _set_point_tilt(point, -_point_tilt(point))
+        source_points = list(_spline_points(source_spline))
+        target_points = list(_spline_points(target_spline))
+        for source_point, target_point in zip(source_points, target_points):
+            _mirror_point_to_object(source_obj, target_obj, source_point, target_point, source_spline, target_spline)
 
             if spline.type == "BEZIER":
-                _mirror_bezier_handles_to_object(source_obj, target_obj, point)
+                _mirror_bezier_handles_to_object(source_obj, target_obj, source_point, target_point)
+
+        _mirror_spline_tilts_to_object(source_obj, target_obj, source_spline, target_spline)
 
 
 def _duplicate_mirror_curve(context, source_obj):
@@ -2830,6 +2879,8 @@ def _duplicate_mirror_curve(context, source_obj):
     target_collection.objects.link(target_obj)
 
     _mirror_curve_data_x(source_obj, target_obj)
+    if _custom_bool(target_obj, "ctk_lock_twist", "hmt_lock_twist"):
+        _store_twist_lock_state(target_obj, True)
     return target_obj
 
 

@@ -148,7 +148,7 @@ Resolution Control:
 
 ## Mirror
 
-`Duplicate Mirror` duplicates all selected curve objects and mirrors them across global X center. Object and data names swap common side tokens such as `.L` and `.R`. Names without a side token are treated as left-side sources, so the original receives `.L` and the mirrored duplicate receives `.R`.
+`Duplicate Mirror` duplicates all selected curve objects and mirrors them across global X center. Object and data names swap common side tokens such as `.L` and `.R`. Names without a side token are treated as left-side sources, so the original receives `.L` and the mirrored duplicate receives `.R`. Mirrored curves also preserve visual twist orientation for asymmetric bevel or drawn curve profiles.
 
 ## Convert / Bridge
 
