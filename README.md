@@ -45,6 +45,13 @@ Subdivide:
 - `Sub Distribution`: optionally redistributes the subdivided selection with `None`, `Evenly`, or `Curve`.
 - `Subdivide Selected`: inserts data-level cuts between selected points, then applies the chosen sub distribution when it is not `None`. Full NURBS splines use knot refinement for safer shape preservation. Preview uses the same data path as Apply, not Blender's edit-mode subdivide operator.
 
+Decimate:
+
+- `Reduction Factor`: controls how much of each selected point run is removed.
+- `Distribution`: chooses `Evenly` or `Curve` for the remaining points.
+- `Decimate Selected`: rebuilds selected runs with fewer points sampled from the evaluated visual path, so the drawn curve is preserved instead of simply deleting raw controls.
+- NURBS decimation keeps a conservative minimum count based on spline order when needed, because dropping below that point count can visibly collapse the drawn curve.
+
 Auto:
 
 - `Auto Detail`: controls how aggressively automatic subdivision adds cuts in curved areas.
@@ -54,7 +61,7 @@ Fit:
 
 - `Fit To Visual Path`: moves the control path closer to the current evaluated visual path without changing point count.
 
-Distribution preview and apply require at least 2 contiguous selected points. `Subdivide Selected` also requires at least 2 contiguous selected points. `None` sub distribution keeps the cut operation minimal while using a NURBS safety refit for full selected splines when needed. `Evenly` and `Curve` sub distribution redistribute the selected subdivided range after cuts are inserted. `Auto Subdivide` uses integrated curvature and chord deviation so low-curvature intervals receive few cuts or no cuts. `Fit To Visual Path` remains separate and can still process the whole open spline when no points are selected because it intentionally projects controls to their current evaluated positions and can change shape. Segment Control keeps object transforms, bevel references, caps, and materials stable.
+Distribution preview and apply require at least 2 contiguous selected points. `Subdivide Selected` also requires at least 2 contiguous selected points. `Decimate Selected` requires at least 3 contiguous selected points. `None` sub distribution keeps the cut operation minimal while using a NURBS safety refit for full selected splines when needed. `Evenly` and `Curve` sub distribution redistribute the selected subdivided range after cuts are inserted. `Auto Subdivide` uses integrated curvature and chord deviation so low-curvature intervals receive few cuts or no cuts. `Fit To Visual Path` remains separate and can still process the whole open spline when no points are selected because it intentionally projects controls to their current evaluated positions and can change shape. Segment Control keeps object transforms, bevel references, caps, and materials stable.
 
 ## Smooth / Reset
 
@@ -197,5 +204,7 @@ Supported curve primitives: Bezier, Circle, NURBS Curve, NURBS Circle, and Path.
 - `Apply Bone Distribution`: repositions the selected bone chain onto the active drawn curve without adding bones.
 - `Subdivide Cuts`: controls how many new bones are inserted into each selected bone.
 - `Subdivide Selected Bones`: subdivides the selected chain, then resamples the result onto the active drawn curve immediately.
+- `Reduction Factor`: controls how much of the selected bone chain is removed by decimation.
+- `Decimate Selected Bones`: removes bones from the selected chain, then resamples the remaining chain onto the active drawn curve immediately.
 
 Preview is off by default so normal selection or transform work does not create any automatic visual changes. When preview is enabled, selection and setting changes rebuild only the ghost object. Pressing an apply button commits the current result to the original object and clears the ghost.

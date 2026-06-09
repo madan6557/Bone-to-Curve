@@ -12,7 +12,7 @@ bl_info = {
 }
 
 import json
-from math import ceil, pi
+from math import ceil, floor, pi
 
 import bpy
 from bpy.app.handlers import persistent
@@ -1772,6 +1772,318 @@ def _assign_spline_states(spline, states):
         _set_curve_state(point, state)
 
 
+def _decimate_target_count(point_count, factor, minimum=2):
+    if point_count <= minimum:
+        return point_count
+
+    target_count = floor(point_count * (1.0 - max(0.0, min(0.95, float(factor)))))
+    return max(minimum, min(point_count - 1, target_count))
+
+
+def _spline_attrs_from_spline(spline):
+    attrs = {}
+    for attr_name in (
+        "resolution_u",
+        "order_u",
+        "use_endpoint_u",
+        "use_bezier_u",
+        "use_cyclic_u",
+        "use_smooth",
+    ):
+        if hasattr(spline, attr_name):
+            attrs[attr_name] = getattr(spline, attr_name)
+    return attrs
+
+
+def _spline_state_from_spline(spline):
+    points = list(_spline_points(spline))
+    states = [_bezier_state_from_point(point) for point in points] if spline.type == "BEZIER" else [_curve_state_from_point(point) for point in points]
+    return {
+        "type": spline.type,
+        "attrs": _spline_attrs_from_spline(spline),
+        "states": states,
+    }
+
+
+def _create_spline_from_state(curve_data, spline_state):
+    states = spline_state["states"]
+    if not states:
+        return None
+
+    spline = curve_data.splines.new(spline_state["type"])
+    if spline.type == "BEZIER":
+        spline.bezier_points.add(len(states) - 1)
+        for point, state in zip(spline.bezier_points, states):
+            _set_bezier_state(point, state)
+    else:
+        spline.points.add(len(states) - 1)
+        for point, state in zip(spline.points, states):
+            _set_curve_state(point, state)
+
+    attrs = spline_state["attrs"]
+    for attr_name, value in attrs.items():
+        if not hasattr(spline, attr_name):
+            continue
+        if attr_name == "order_u":
+            value = max(2, min(int(value), len(states)))
+        try:
+            setattr(spline, attr_name, value)
+        except (TypeError, ValueError):
+            pass
+
+    return spline
+
+
+def _replace_curve_spline_states(curve_data, spline_states):
+    for spline in list(curve_data.splines):
+        curve_data.splines.remove(spline)
+
+    for spline_state in spline_states:
+        _create_spline_from_state(curve_data, spline_state)
+
+
+def _source_state_interval(source_distances, target_distance):
+    if len(source_distances) < 2:
+        return 0, 0, 0.0
+
+    if target_distance <= source_distances[0]:
+        return 0, 0, 0.0
+    if target_distance >= source_distances[-1]:
+        last_index = len(source_distances) - 1
+        return last_index, last_index, 0.0
+
+    for index in range(len(source_distances) - 1):
+        start_distance = source_distances[index]
+        end_distance = source_distances[index + 1]
+        if target_distance > end_distance:
+            continue
+
+        span = end_distance - start_distance
+        factor = 0.0 if span <= MIN_BONE_LENGTH else (target_distance - start_distance) / span
+        return index, index + 1, max(0.0, min(1.0, factor))
+
+    last_index = len(source_distances) - 1
+    return last_index, last_index, 0.0
+
+
+def _decimate_state_at_distance(curve_obj, spline, states, source_distances, path_points, target_distance):
+    first_index, second_index, factor = _source_state_interval(source_distances, target_distance)
+    first = states[first_index]
+    second = states[second_index]
+    target_world = _point_at_distance(path_points, target_distance)
+    target_local = curve_obj.matrix_world.inverted() @ target_world
+    radius = first["radius"] + (second["radius"] - first["radius"]) * factor
+    tilt = first["tilt"] + (second["tilt"] - first["tilt"]) * factor
+    weight_softbody = first["weight_softbody"] + (second["weight_softbody"] - first["weight_softbody"]) * factor
+
+    if spline.type == "BEZIER":
+        return {
+            "co": target_local,
+            "handle_left": target_local.copy(),
+            "handle_right": target_local.copy(),
+            "handle_left_type": "FREE",
+            "handle_right_type": "FREE",
+            "tilt": tilt,
+            "radius": radius,
+            "weight_softbody": weight_softbody,
+            "select_control_point": True,
+            "select_left_handle": True,
+            "select_right_handle": True,
+        }
+
+    first_weight = float(first["co"][3])
+    second_weight = float(second["co"][3])
+    weight = first_weight + (second_weight - first_weight) * factor
+    return {
+        "co": (target_local.x, target_local.y, target_local.z, weight),
+        "tilt": tilt,
+        "radius": radius,
+        "weight_softbody": weight_softbody,
+        "select": True,
+    }
+
+
+def _fit_bezier_states_to_path(curve_obj, states, target_distances, path_points):
+    if len(states) < 2 or len(states) != len(target_distances):
+        return
+
+    matrix_inverted = curve_obj.matrix_world.inverted()
+    for index, state in enumerate(states):
+        current_world = curve_obj.matrix_world @ state["co"]
+        tangent = _path_tangent_at_distance(path_points, target_distances[index])
+
+        if index > 0:
+            left_length = max(0.0, target_distances[index] - target_distances[index - 1]) / 3.0
+            state["handle_left"] = matrix_inverted @ (current_world - tangent * left_length)
+        else:
+            state["handle_left"] = state["co"].copy()
+
+        if index + 1 < len(states):
+            right_length = max(0.0, target_distances[index + 1] - target_distances[index]) / 3.0
+            state["handle_right"] = matrix_inverted @ (current_world + tangent * right_length)
+        else:
+            state["handle_right"] = state["co"].copy()
+
+
+def _fit_nurbs_states_to_path(curve_obj, states, target_distances, path_points, order, use_endpoint):
+    point_count = len(states)
+    if point_count < 2 or point_count != len(target_distances):
+        return False
+
+    degree = max(1, min(int(order) - 1, point_count - 1))
+    knots = _nurbs_knot_vector(point_count, degree, use_endpoint)
+    if knots is None:
+        return False
+
+    total_length = _polyline_length(path_points)
+    target_parameters = _normalized_parameters_from_distances(target_distances, total_length)
+    weights = [max(MIN_BONE_LENGTH, float(state["co"][3])) for state in states]
+    matrix_rows = [
+        _rational_nurbs_basis_values(point_count, degree, knots, weights, parameter)
+        for parameter in target_parameters
+    ]
+    target_positions = [_point_at_distance(path_points, distance) for distance in target_distances]
+    solved_positions = _solve_vector_linear_system(matrix_rows, target_positions)
+    if solved_positions is None:
+        return False
+
+    matrix_inverted = curve_obj.matrix_world.inverted()
+    for state, world_position, weight in zip(states, solved_positions, weights):
+        local_position = matrix_inverted @ world_position
+        state["co"] = (local_position.x, local_position.y, local_position.z, weight)
+
+    return True
+
+
+def _decimated_run_states(context, curve_obj, spline, run, states, factor, distribution_mode, curvature_bias, path_points):
+    minimum_count = 2
+    if spline.type == "NURBS":
+        minimum_count = min(len(run) - 1, max(2, int(getattr(spline, "order_u", 2))))
+
+    target_count = _decimate_target_count(len(run), factor, minimum=minimum_count)
+    if target_count >= len(run):
+        return [states[index] for index in run], 0
+
+    path_points, source_distances = _distribution_path_for_indices(context, curve_obj, spline, run, distribution_mode, path_points)
+    if len(path_points) < 2 or len(source_distances) < 2 or not _has_valid_segment(path_points):
+        return [states[index] for index in run], 0
+    full_run = _runs_cover_full_spline(spline, [run])
+    if full_run:
+        total_length = _polyline_length(path_points)
+        source_distances = [
+            total_length * index / (len(run) - 1)
+            for index in range(len(run))
+        ]
+
+    target_distances = _segment_distribution_distances(
+        path_points,
+        source_distances,
+        target_count,
+        distribution_mode,
+        curvature_bias,
+    )
+    if len(target_distances) != target_count:
+        return [states[index] for index in run], 0
+
+    run_states = [
+        _decimate_state_at_distance(
+            curve_obj,
+            spline,
+            [states[index] for index in run],
+            source_distances,
+            path_points,
+            target_distance,
+        )
+        for target_distance in target_distances
+    ]
+    if spline.type == "BEZIER":
+        _fit_bezier_states_to_path(curve_obj, run_states, target_distances, path_points)
+    elif spline.type == "NURBS" and full_run:
+        _fit_nurbs_states_to_path(
+            curve_obj,
+            run_states,
+            target_distances,
+            path_points,
+            getattr(spline, "order_u", 2),
+            getattr(spline, "use_endpoint_u", True),
+        )
+
+    return run_states, len(run) - target_count
+
+
+def _decimate_spline_state(context, curve_obj, spline, factor, distribution_mode, curvature_bias, path_points=None):
+    spline_state = _spline_state_from_spline(spline)
+    valid_runs = [run for run in _selected_index_runs(spline) if len(run) >= 3]
+    if not valid_runs:
+        return spline_state, 0
+
+    if path_points is None:
+        path_points = _evaluated_spline_path_points(context, curve_obj, spline)
+    if len(path_points) < 2 or not _has_valid_segment(path_points):
+        path_points = _spline_world_positions(curve_obj, spline)
+
+    states = spline_state["states"]
+    run_by_start = {run[0]: run for run in valid_runs}
+    new_states = []
+    removed_count = 0
+    index = 0
+
+    while index < len(states):
+        run = run_by_start.get(index)
+        if run is None:
+            new_states.append(states[index])
+            index += 1
+            continue
+
+        run_states, run_removed = _decimated_run_states(
+            context,
+            curve_obj,
+            spline,
+            run,
+            states,
+            factor,
+            distribution_mode,
+            curvature_bias,
+            path_points,
+        )
+        new_states.extend(run_states)
+        removed_count += run_removed
+        index = run[-1] + 1
+
+    if removed_count:
+        spline_state["states"] = new_states
+        if spline_state["type"] == "NURBS" and "order_u" in spline_state["attrs"]:
+            spline_state["attrs"]["order_u"] = max(2, min(int(spline_state["attrs"]["order_u"]), len(new_states)))
+
+    return spline_state, removed_count
+
+
+def _decimate_selected_curve_data(context, curve_obj, factor, distribution_mode, curvature_bias):
+    spline_states = []
+    removed_count = 0
+
+    for spline in list(curve_obj.data.splines):
+        if not _is_supported_spline(spline):
+            spline_states.append(_spline_state_from_spline(spline))
+            continue
+
+        spline_state, spline_removed = _decimate_spline_state(
+            context,
+            curve_obj,
+            spline,
+            factor,
+            distribution_mode,
+            curvature_bias,
+        )
+        spline_states.append(spline_state)
+        removed_count += spline_removed
+
+    if removed_count:
+        _replace_curve_spline_states(curve_obj.data, spline_states)
+
+    return removed_count
+
+
 def _segment_preview_point_count(curve_obj, settings):
     total_count = 0
     for spline in _editable_splines(curve_obj):
@@ -3302,6 +3614,66 @@ def _subdivide_edit_bone_chain(edit_bones, chain, cuts):
     return expanded_chain, added_count
 
 
+def _spaced_chain_keep_indices(chain_length, target_count):
+    if target_count <= 1:
+        return [0]
+
+    keep_indices = []
+    for index in range(target_count):
+        keep_index = round(index * (chain_length - 1) / (target_count - 1))
+        if keep_index not in keep_indices:
+            keep_indices.append(keep_index)
+
+    candidate = 0
+    while len(keep_indices) < target_count and candidate < chain_length:
+        if candidate not in keep_indices:
+            keep_indices.append(candidate)
+        candidate += 1
+
+    return sorted(keep_indices[:target_count])
+
+
+def _decimate_edit_bone_chain(edit_bones, chain, factor):
+    if len(chain) < 2:
+        return chain, 0
+
+    target_count = _decimate_target_count(len(chain), factor, minimum=1)
+    if target_count >= len(chain):
+        return chain, 0
+
+    keep_indices = set(_spaced_chain_keep_indices(len(chain), target_count))
+    kept_chain = [name for index, name in enumerate(chain) if index in keep_indices and edit_bones.get(name) is not None]
+    remove_names = [name for index, name in enumerate(chain) if index not in keep_indices and edit_bones.get(name) is not None]
+
+    for name in remove_names:
+        bone = edit_bones.get(name)
+        if bone is not None:
+            bone.use_connect = False
+
+    for name in remove_names:
+        bone = edit_bones.get(name)
+        if bone is not None:
+            edit_bones.remove(bone)
+
+    for index, name in enumerate(kept_chain):
+        bone = edit_bones.get(name)
+        if bone is None:
+            continue
+
+        if index == 0:
+            bone.parent = None
+            bone.use_connect = False
+            continue
+
+        parent = edit_bones.get(kept_chain[index - 1])
+        if parent is not None:
+            bone.parent = parent
+            bone.head = parent.tail
+            bone.use_connect = True
+
+    return kept_chain, len(remove_names)
+
+
 def _select_edit_bone_chains(edit_bones, chains):
     selected_set = {name for chain in chains for name in chain}
     for bone in edit_bones:
@@ -3502,8 +3874,10 @@ def _segment_preview_signature(context, settings):
             "operation": settings.segment_preview_operation,
             "distribution": settings.distribution_mode,
             "sub_distribution": settings.subdivide_distribution,
+            "decimate_distribution": settings.decimate_distribution_mode,
             "bias": round(settings.curvature_bias, 6),
             "cuts": settings.subdivide_cuts,
+            "decimate_factor": round(settings.decimate_factor, 6),
             "selection": _selected_point_signature(curve_obj),
         }
     )
@@ -3524,6 +3898,7 @@ def _bone_preview_signature(context, settings):
             "distribution": settings.rig_distribution_mode,
             "bias": round(settings.rig_curvature_bias, 6),
             "cuts": settings.rig_subdivide_cuts,
+            "decimate_factor": round(settings.rig_decimate_factor, 6),
             "selection": _selected_bone_signature(armature_obj),
         }
     )
@@ -3579,6 +3954,19 @@ def _preview_segment_subdivide(context, preview_obj, settings):
     return changed_count
 
 
+def _preview_segment_decimate(context, preview_obj, settings):
+    if not any(len(run) >= 3 for spline in _editable_splines(preview_obj) for run in _selected_index_runs(spline)):
+        return 0
+
+    return _decimate_selected_curve_data(
+        context,
+        preview_obj,
+        settings.decimate_factor,
+        settings.decimate_distribution_mode,
+        settings.curvature_bias,
+    )
+
+
 def _build_segment_preview(context, settings):
     curve_obj = _active_curve(context)
     if curve_obj is None or not _segment_has_valid_preview_selection(curve_obj):
@@ -3596,6 +3984,8 @@ def _build_segment_preview(context, settings):
 
     if settings.segment_preview_operation == "SUBDIVIDE":
         changed_count = _preview_segment_subdivide(context, preview_obj, settings)
+    elif settings.segment_preview_operation == "DECIMATE":
+        changed_count = _preview_segment_decimate(context, preview_obj, settings)
     else:
         changed_count = _preview_segment_distribution(context, preview_obj, settings)
 
@@ -3703,6 +4093,60 @@ def _preview_bone_subdivide(context, preview_obj, selected_names, settings):
     return added_count, changed_count, expanded_chains
 
 
+def _preview_bone_decimate(context, preview_obj, selected_names, settings):
+    curve_obj = _active_curve(context)
+    path_candidates = _curve_path_candidates(context, curve_obj)
+    if not path_candidates:
+        return 0, 0, []
+
+    state = _capture_view_state(context)
+    removed_count = 0
+    changed_count = 0
+    decimated_chains = []
+
+    try:
+        context.view_layer.objects.active = preview_obj
+        preview_obj.select_set(True)
+        if preview_obj.mode != "EDIT":
+            bpy.ops.object.mode_set(mode="EDIT")
+
+        edit_bones = preview_obj.data.edit_bones
+        selected_names = [name for name in selected_names if edit_bones.get(name) is not None]
+        if not selected_names:
+            return 0, 0, []
+
+        chains = _selected_edit_bone_chains(edit_bones, selected_names)
+        if chains is None or not _edit_bone_chains_are_connected(edit_bones, chains):
+            return 0, 0, []
+
+        for chain in chains:
+            decimated_chain, chain_removed_count = _decimate_edit_bone_chain(
+                edit_bones,
+                chain,
+                settings.rig_decimate_factor,
+            )
+            if chain_removed_count:
+                decimated_chains.append(decimated_chain)
+                removed_count += chain_removed_count
+
+        if removed_count == 0:
+            return 0, 0, []
+
+        changed_count, _skipped_count = _resample_edit_bone_chains_to_curve(
+            path_candidates,
+            preview_obj,
+            edit_bones,
+            decimated_chains,
+            settings.rig_distribution_mode,
+            settings.rig_curvature_bias,
+        )
+        _select_edit_bone_chains(edit_bones, decimated_chains)
+    finally:
+        _restore_view_state(context, state)
+
+    return removed_count, changed_count, decimated_chains
+
+
 def _build_bone_preview(context, settings):
     curve_obj = _active_curve(context)
     armature_obj = _active_or_selected_armature(context)
@@ -3719,6 +4163,9 @@ def _build_bone_preview(context, settings):
     if settings.bone_preview_operation == "SUBDIVIDE":
         added_count, changed_count, _chains = _preview_bone_subdivide(context, preview_obj, selected_names, settings)
         success = added_count > 0 and changed_count > 0
+    elif settings.bone_preview_operation == "DECIMATE":
+        removed_count, changed_count, _chains = _preview_bone_decimate(context, preview_obj, selected_names, settings)
+        success = removed_count > 0 and changed_count > 0
     else:
         changed_count, _skipped_count, _chains = _preview_bone_distribution(context, preview_obj, selected_names, settings)
         success = changed_count > 0
@@ -3845,6 +4292,11 @@ def _update_segment_subdivide_preview(settings, context):
     _schedule_ctk_preview_refresh(context)
 
 
+def _update_segment_decimate_preview(settings, context):
+    _set_segment_preview_operation(settings, "DECIMATE")
+    _schedule_ctk_preview_refresh(context)
+
+
 def _update_preview_settings(settings, context):
     _schedule_ctk_preview_refresh(context)
 
@@ -3856,6 +4308,11 @@ def _update_bone_distribution_preview(settings, context):
 
 def _update_bone_subdivide_preview(settings, context):
     _set_bone_preview_operation(settings, "SUBDIVIDE")
+    _schedule_ctk_preview_refresh(context)
+
+
+def _update_bone_decimate_preview(settings, context):
+    _set_bone_preview_operation(settings, "DECIMATE")
     _schedule_ctk_preview_refresh(context)
 
 
@@ -3976,6 +4433,27 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
         min=1,
         max=16,
         update=_update_segment_subdivide_preview,
+    )
+
+    decimate_factor: FloatProperty(
+        name="Reduction Factor",
+        description="Fraction of selected curve points removed by Decimate Selected",
+        default=0.5,
+        min=0.05,
+        max=0.95,
+        subtype="FACTOR",
+        update=_update_segment_decimate_preview,
+    )
+
+    decimate_distribution_mode: EnumProperty(
+        name="Distribution",
+        description="Distribution mode used after curve point decimation",
+        items=(
+            ("EVEN", "Evenly", "Space remaining points evenly along the visual path"),
+            ("CURVE", "Curve", "Keep extra point density in curved areas"),
+        ),
+        default="EVEN",
+        update=_update_segment_decimate_preview,
     )
 
     segment_preview_enabled: BoolProperty(
@@ -4253,6 +4731,16 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
         min=1,
         max=16,
         update=_update_bone_subdivide_preview,
+    )
+
+    rig_decimate_factor: FloatProperty(
+        name="Reduction Factor",
+        description="Fraction of selected bones removed by Decimate Selected Bones",
+        default=0.5,
+        min=0.05,
+        max=0.95,
+        subtype="FACTOR",
+        update=_update_bone_decimate_preview,
     )
 
     bone_preview_enabled: BoolProperty(
@@ -4561,6 +5049,113 @@ class CTK_OT_subdivide_selected_bones(bpy.types.Operator):
             context.view_layer.objects.active = curve_obj
 
         message = f"Added {added_count} bones and updated {changed_count} selected bones."
+        if skipped_count:
+            message += f" Skipped {skipped_count} chains."
+        _clear_ctk_previews("BONE")
+        _store_current_preview_signature(context, "BONE")
+        self.report({"INFO"}, message)
+        return {"FINISHED"}
+
+
+class CTK_OT_decimate_selected_bones(bpy.types.Operator):
+    bl_idname = "curve_toolkit.decimate_selected_bones"
+    bl_label = "Decimate Selected Bones"
+    bl_description = "Reduce selected armature bone chains and resample them onto the active drawn curve"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_curve(context) is not None and _active_or_selected_armature(context) is not None
+
+    def execute(self, context):
+        curve_obj = _active_curve(context)
+        armature_obj = _active_or_selected_armature(context)
+        if curve_obj is None:
+            self.report({"ERROR"}, "Active object must be a Curve.")
+            return {"CANCELLED"}
+        if armature_obj is None:
+            self.report({"ERROR"}, "Select an armature with selected bones.")
+            return {"CANCELLED"}
+
+        selected_names = _selected_bone_names(armature_obj)
+        if not selected_names:
+            self.report({"ERROR"}, "Select at least two connected armature bones.")
+            return {"CANCELLED"}
+
+        settings = context.scene.curve_toolkit
+        removed_count = 0
+        changed_count = 0
+        skipped_count = 0
+        decimated_chains = []
+
+        try:
+            _mode_set_object(context)
+            path_candidates = _curve_path_candidates(context, curve_obj)
+            if not path_candidates:
+                self.report({"ERROR"}, "Active curve has no valid drawn path.")
+                return {"CANCELLED"}
+
+            context.view_layer.objects.active = armature_obj
+            armature_obj.select_set(True)
+            if armature_obj.mode != "EDIT":
+                bpy.ops.object.mode_set(mode="EDIT")
+
+            edit_bones = armature_obj.data.edit_bones
+            selected_names = [name for name in selected_names if edit_bones.get(name) is not None]
+            if not selected_names:
+                self.report({"ERROR"}, "Selected bones are no longer available in Edit Mode.")
+                return {"CANCELLED"}
+
+            chains = _selected_edit_bone_chains(edit_bones, selected_names)
+            if chains is None:
+                self.report({"ERROR"}, "Selected bones must be linear connected chains.")
+                return {"CANCELLED"}
+            if not _edit_bone_chains_are_connected(edit_bones, chains):
+                self.report({"ERROR"}, "Selected bones must be connected chains.")
+                return {"CANCELLED"}
+            if not any(len(chain) >= 2 for chain in chains):
+                self.report({"ERROR"}, "Select at least two connected armature bones.")
+                return {"CANCELLED"}
+
+            for chain in chains:
+                decimated_chain, chain_removed_count = _decimate_edit_bone_chain(
+                    edit_bones,
+                    chain,
+                    settings.rig_decimate_factor,
+                )
+                if chain_removed_count == 0:
+                    skipped_count += 1
+                    continue
+
+                decimated_chains.append(decimated_chain)
+                removed_count += chain_removed_count
+
+            if removed_count == 0:
+                self.report({"ERROR"}, "No bones were removed.")
+                return {"CANCELLED"}
+
+            changed_count, resample_skipped = _resample_edit_bone_chains_to_curve(
+                path_candidates,
+                armature_obj,
+                edit_bones,
+                decimated_chains,
+                settings.rig_distribution_mode,
+                settings.rig_curvature_bias,
+            )
+            skipped_count += resample_skipped
+            if changed_count == 0:
+                self.report({"ERROR"}, "Decimated bones could not be matched to the active curve.")
+                return {"CANCELLED"}
+
+            _select_edit_bone_chains(edit_bones, decimated_chains)
+        finally:
+            if context.view_layer.objects.active == armature_obj and armature_obj.mode != "OBJECT":
+                bpy.ops.object.mode_set(mode="OBJECT")
+            curve_obj.select_set(True)
+            armature_obj.select_set(True)
+            context.view_layer.objects.active = curve_obj
+
+        message = f"Removed {removed_count} bones and updated {changed_count} selected bones."
         if skipped_count:
             message += f" Skipped {skipped_count} chains."
         _clear_ctk_previews("BONE")
@@ -4958,6 +5553,64 @@ class CTK_OT_segment_subdivide_selected(bpy.types.Operator):
         _clear_ctk_previews("SEGMENT")
         _store_current_preview_signature(context, "SEGMENT")
         self.report({"INFO"}, f"Added {added_count} curve points.")
+        return {"FINISHED"}
+
+
+class CTK_OT_segment_decimate_selected(bpy.types.Operator):
+    bl_idname = "curve_toolkit.segment_decimate_selected"
+    bl_label = "Decimate Selected"
+    bl_description = "Reduce selected curve points while preserving the evaluated visual path"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_curve(context) is not None
+
+    def execute(self, context):
+        curve_obj, _splines = _require_editable_open_curve(self, context)
+        if curve_obj is None:
+            return {"CANCELLED"}
+
+        settings = context.scene.curve_toolkit
+        previous_mode = curve_obj.mode
+        _set_active_only(context, curve_obj)
+        if curve_obj.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+
+        splines = _editable_splines(curve_obj)
+        if not any(len(run) >= 3 for spline in splines for run in _selected_index_runs(spline)):
+            if previous_mode != "OBJECT":
+                bpy.ops.object.mode_set(mode=previous_mode)
+            self.report({"ERROR"}, "Select at least 3 contiguous curve points to decimate.")
+            return {"CANCELLED"}
+
+        try:
+            removed_count = _decimate_selected_curve_data(
+                context,
+                curve_obj,
+                settings.decimate_factor,
+                settings.decimate_distribution_mode,
+                settings.curvature_bias,
+            )
+        except Exception as exc:
+            if curve_obj.mode != "OBJECT":
+                bpy.ops.object.mode_set(mode="OBJECT")
+            if previous_mode != "OBJECT":
+                bpy.ops.object.mode_set(mode=previous_mode)
+            self.report({"ERROR"}, f"Decimate failed: {exc}")
+            return {"CANCELLED"}
+
+        context.view_layer.update()
+        if previous_mode != "OBJECT":
+            bpy.ops.object.mode_set(mode=previous_mode)
+
+        if removed_count == 0:
+            self.report({"ERROR"}, "No curve points were removed.")
+            return {"CANCELLED"}
+
+        _clear_ctk_previews("SEGMENT")
+        _store_current_preview_signature(context, "SEGMENT")
+        self.report({"INFO"}, f"Removed {removed_count} curve points.")
         return {"FINISHED"}
 
 
@@ -6484,6 +7137,15 @@ class CTK_PT_tools(bpy.types.Panel):
             segment_column.operator(CTK_OT_segment_subdivide_selected.bl_idname)
 
             segment_column.separator()
+            segment_column.label(text="Decimate")
+            segment_column.prop(settings, "decimate_factor", slider=True)
+            segment_column.prop(settings, "decimate_distribution_mode")
+            bias_row = segment_column.row(align=True)
+            bias_row.enabled = settings.decimate_distribution_mode == "CURVE"
+            bias_row.prop(settings, "curvature_bias", slider=True)
+            segment_column.operator(CTK_OT_segment_decimate_selected.bl_idname)
+
+            segment_column.separator()
             segment_column.label(text="Auto")
             segment_column.prop(settings, "auto_subdivide_factor", slider=True)
             segment_column.operator(CTK_OT_segment_auto_subdivide.bl_idname)
@@ -6738,10 +7400,20 @@ class CTK_PT_tools(bpy.types.Panel):
             bone_control_column = bone_control_box.column(align=True)
             bone_control_column.enabled = curve_obj is not None and target_armature_obj is not None
             bone_control_column.operator(CTK_OT_apply_bone_distribution.bl_idname)
+
+            bone_control_box.separator()
+            bone_control_box.label(text="Subdivide")
             bone_control_box.prop(settings, "rig_subdivide_cuts")
             bone_control_column = bone_control_box.column(align=True)
             bone_control_column.enabled = curve_obj is not None and target_armature_obj is not None
             bone_control_column.operator(CTK_OT_subdivide_selected_bones.bl_idname)
+
+            bone_control_box.separator()
+            bone_control_box.label(text="Decimate")
+            bone_control_box.prop(settings, "rig_decimate_factor", slider=True)
+            bone_control_column = bone_control_box.column(align=True)
+            bone_control_column.enabled = curve_obj is not None and target_armature_obj is not None
+            bone_control_column.operator(CTK_OT_decimate_selected_bones.bl_idname)
 
 
 classes = (
@@ -6774,6 +7446,7 @@ classes = (
     CTK_OT_generate_custom_bones_from_active_curve,
     CTK_OT_apply_bone_distribution,
     CTK_OT_subdivide_selected_bones,
+    CTK_OT_decimate_selected_bones,
     CTK_OT_clear_preview,
     CTK_OT_invert_selected_bones,
     CTK_OT_reset_path,
@@ -6783,6 +7456,7 @@ classes = (
     CTK_OT_snap_cursor,
     CTK_OT_segment_distribute,
     CTK_OT_segment_subdivide_selected,
+    CTK_OT_segment_decimate_selected,
     CTK_OT_segment_auto_subdivide,
     CTK_OT_smooth_scale,
     CTK_OT_smooth_curve,
