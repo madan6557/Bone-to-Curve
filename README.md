@@ -157,6 +157,10 @@ Resolution Control:
 
 `Mirror Axis` chooses the global axis center used by `Duplicate Mirror`: X, Y, or Z. `Duplicate Mirror` duplicates all selected curve objects and mirrors them across that axis center. Object and data names swap common side tokens such as `.L` and `.R`. Names without a side token are treated as left-side sources, so the original receives `.L` and the mirrored duplicate receives `.R`. Mirrored curves also preserve visual twist orientation for asymmetric bevel or drawn curve profiles.
 
+`Select L` and `Select R` select left-side or right-side curve objects in the current mirror collection scope. If curve objects are selected, the scope is their direct collections. If nothing is selected, the active context collection is used. Child collections are not included automatically.
+
+`Remove Duplicate` removes the opposite-side mirror duplicate for selected curve objects and keeps the selected side intact. If both sides are selected, the selected counterpart is skipped so the command does not delete user-selected curves.
+
 ## Convert / Bridge
 
 - `Export Mesh Copy`: creates evaluated mesh copies of selected curves in a separate collection without deleting or converting the originals.

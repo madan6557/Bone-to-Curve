@@ -82,9 +82,20 @@ MIRROR_SIDE_REPLACEMENTS = (
     ("right", "left"),
 )
 
+MIRROR_LEFT_TOKENS = (".L", "_L", "-L", "Left", "left")
+MIRROR_RIGHT_TOKENS = (".R", "_R", "-R", "Right", "right")
+
 
 def _has_mirror_side_token(name):
     return any(source in name for source, _target in MIRROR_SIDE_REPLACEMENTS)
+
+
+def _mirror_side(name):
+    if any(token in name for token in MIRROR_LEFT_TOKENS):
+        return "L"
+    if any(token in name for token in MIRROR_RIGHT_TOKENS):
+        return "R"
+    return None
 
 
 def _mirror_side_name(name):
@@ -99,6 +110,41 @@ def _ensure_left_side_name(name, existing_names):
     if _has_mirror_side_token(name):
         return name
     return _unique_name(f"{name}.L", existing_names)
+
+
+def _mirror_selected_curve_collections(context):
+    selected_curves = [
+        obj
+        for obj in context.selected_objects
+        if obj.type == "CURVE" and not _is_ctk_preview_object(obj)
+    ]
+    collections = []
+    seen = set()
+
+    for obj in selected_curves:
+        for collection in obj.users_collection:
+            if collection.name in seen:
+                continue
+            collections.append(collection)
+            seen.add(collection.name)
+
+    if collections:
+        return collections
+    return [context.collection] if context.collection is not None else []
+
+
+def _mirror_collection_curve_objects(context):
+    objects = []
+    seen = set()
+    for collection in _mirror_selected_curve_collections(context):
+        for obj in collection.objects:
+            if obj.name in seen:
+                continue
+            if obj.type != "CURVE" or _is_ctk_preview_object(obj):
+                continue
+            objects.append(obj)
+            seen.add(obj.name)
+    return objects
 
 
 def _control_point_count(spline):
@@ -6077,6 +6123,122 @@ class CTK_OT_duplicate_mirror_selected_curves(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CTK_OT_select_mirror_side(bpy.types.Operator):
+    bl_idname = "curve_toolkit.select_mirror_side"
+    bl_label = "Select Mirror Side"
+    bl_description = "Select left or right side curve objects in the active mirror collection scope"
+    bl_options = {"REGISTER", "UNDO"}
+
+    side: EnumProperty(
+        name="Side",
+        items=(
+            ("L", "Left", "Select left-side curve objects"),
+            ("R", "Right", "Select right-side curve objects"),
+        ),
+        default="L",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return context.collection is not None
+
+    def execute(self, context):
+        target_objects = [
+            obj
+            for obj in _mirror_collection_curve_objects(context)
+            if _mirror_side(obj.name) == self.side
+        ]
+        if not target_objects:
+            side_name = "left" if self.side == "L" else "right"
+            self.report({"ERROR"}, f"No {side_name}-side curve objects found in the mirror collection scope.")
+            return {"CANCELLED"}
+
+        if context.view_layer.objects.active is not None and context.view_layer.objects.active.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+
+        for obj in context.view_layer.objects:
+            obj.select_set(False)
+        for obj in target_objects:
+            obj.select_set(True)
+
+        context.view_layer.objects.active = target_objects[-1]
+        context.view_layer.update()
+        side_name = "left" if self.side == "L" else "right"
+        self.report({"INFO"}, f"Selected {len(target_objects)} {side_name}-side curve objects.")
+        return {"FINISHED"}
+
+
+class CTK_OT_remove_mirror_duplicates(bpy.types.Operator):
+    bl_idname = "curve_toolkit.remove_mirror_duplicates"
+    bl_label = "Remove Duplicate"
+    bl_description = "Remove opposite-side mirrored curve duplicates for selected curve objects"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return any(
+            obj.type == "CURVE" and not _is_ctk_preview_object(obj)
+            for obj in context.selected_objects
+        )
+
+    def execute(self, context):
+        selected_curves = [
+            obj
+            for obj in context.selected_objects
+            if obj.type == "CURVE" and not _is_ctk_preview_object(obj)
+        ]
+        selected_names = {obj.name for obj in selected_curves}
+        scoped_objects = {
+            obj.name: obj
+            for obj in _mirror_collection_curve_objects(context)
+        }
+        removable_objects = []
+        skipped_selected = 0
+        skipped_without_side = 0
+
+        for source_obj in selected_curves:
+            if _mirror_side(source_obj.name) is None:
+                skipped_without_side += 1
+                continue
+
+            counterpart_name = _mirror_side_name(source_obj.name)
+            counterpart_obj = scoped_objects.get(counterpart_name)
+            if counterpart_obj is None:
+                continue
+            if counterpart_obj.name in selected_names:
+                skipped_selected += 1
+                continue
+            if counterpart_obj not in removable_objects:
+                removable_objects.append(counterpart_obj)
+
+        if not removable_objects:
+            message = "No opposite-side mirror duplicates found in the mirror collection scope."
+            if skipped_selected:
+                message = "Opposite-side duplicates are selected too, so nothing was removed."
+            elif skipped_without_side == len(selected_curves):
+                message = "Selected curve objects do not have supported mirror side tokens."
+            self.report({"ERROR"}, message)
+            return {"CANCELLED"}
+
+        if context.view_layer.objects.active is not None and context.view_layer.objects.active.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+
+        removed_count = 0
+        for obj in removable_objects:
+            curve_data = obj.data
+            bpy.data.objects.remove(obj, do_unlink=True)
+            removed_count += 1
+            if curve_data is not None and curve_data.users == 0:
+                bpy.data.curves.remove(curve_data)
+
+        context.view_layer.update()
+        message = f"Removed {removed_count} mirror duplicate curve objects."
+        if skipped_selected:
+            message += f" Skipped {skipped_selected} selected counterparts."
+        self.report({"INFO"}, message)
+        return {"FINISHED"}
+
+
 class CTK_OT_set_fill_caps(bpy.types.Operator):
     bl_idname = "curve_toolkit.set_fill_caps"
     bl_label = "Close Ends"
@@ -7341,6 +7503,12 @@ class CTK_PT_tools(bpy.types.Panel):
         if self._draw_foldout(mirror_box, settings, "show_mirror", "Mirror", "MOD_MIRROR"):
             mirror_box.prop(settings, "mirror_axis")
             mirror_box.operator(CTK_OT_duplicate_mirror_selected_curves.bl_idname)
+            row = mirror_box.row(align=True)
+            op = row.operator(CTK_OT_select_mirror_side.bl_idname, text="Select L")
+            op.side = "L"
+            op = row.operator(CTK_OT_select_mirror_side.bl_idname, text="Select R")
+            op.side = "R"
+            mirror_box.operator(CTK_OT_remove_mirror_duplicates.bl_idname)
 
         convert_box = layout.box()
         if self._draw_foldout(convert_box, settings, "show_convert_tools", "Convert / Bridge", "MESH_DATA"):
@@ -7468,6 +7636,8 @@ classes = (
     CTK_OT_unlock_twist,
     CTK_OT_set_endpoint_lock,
     CTK_OT_duplicate_mirror_selected_curves,
+    CTK_OT_select_mirror_side,
+    CTK_OT_remove_mirror_duplicates,
     CTK_OT_set_fill_caps,
     CTK_OT_add_resolution_collection,
     CTK_OT_remove_resolution_collection,
