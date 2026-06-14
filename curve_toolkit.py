@@ -123,27 +123,90 @@ def _mirror_selected_curve_collections(context):
 
     for obj in selected_curves:
         for collection in obj.users_collection:
-            if collection.name in seen:
+            collection_key = collection.as_pointer()
+            if collection_key in seen:
                 continue
             collections.append(collection)
-            seen.add(collection.name)
+            seen.add(collection_key)
+
+    return collections
+
+
+def _mirror_context_collections(context):
+    collections = []
+    seen = set()
+
+    try:
+        selected_ids = getattr(context, "selected_ids", ())
+    except AttributeError:
+        selected_ids = ()
+
+    for selected_id in selected_ids:
+        if not isinstance(selected_id, bpy.types.Collection):
+            continue
+
+        collection_key = selected_id.as_pointer()
+        if collection_key in seen:
+            continue
+        collections.append(selected_id)
+        seen.add(collection_key)
 
     if collections:
         return collections
-    return [context.collection] if context.collection is not None else []
+
+    fallback_collection = context.collection
+    if fallback_collection is None and context.view_layer.active_layer_collection is not None:
+        fallback_collection = context.view_layer.active_layer_collection.collection
+
+    if fallback_collection is not None:
+        collections.append(fallback_collection)
+
+    return collections
+
+
+def _mirror_collection_scope(context):
+    selected_curve_collections = _mirror_selected_curve_collections(context)
+    if selected_curve_collections:
+        return [(collection, False) for collection in selected_curve_collections]
+
+    return [(collection, True) for collection in _mirror_context_collections(context)]
+
+
+def _mirror_collection_objects(collection, recursive):
+    if collection is None:
+        return []
+    if not recursive:
+        return list(collection.objects)
+
+    objects = []
+    seen_collections = set()
+
+    def visit(current_collection):
+        collection_key = current_collection.as_pointer()
+        if collection_key in seen_collections:
+            return
+
+        seen_collections.add(collection_key)
+        objects.extend(current_collection.objects)
+        for child_collection in current_collection.children:
+            visit(child_collection)
+
+    visit(collection)
+    return objects
 
 
 def _mirror_collection_curve_objects(context):
     objects = []
     seen = set()
-    for collection in _mirror_selected_curve_collections(context):
-        for obj in collection.objects:
-            if obj.name in seen:
+    for collection, recursive in _mirror_collection_scope(context):
+        for obj in _mirror_collection_objects(collection, recursive):
+            object_key = obj.as_pointer()
+            if object_key in seen:
                 continue
             if obj.type != "CURVE" or _is_ctk_preview_object(obj):
                 continue
             objects.append(obj)
-            seen.add(obj.name)
+            seen.add(object_key)
     return objects
 
 
