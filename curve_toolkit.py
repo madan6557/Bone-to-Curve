@@ -132,24 +132,52 @@ def _mirror_selected_curve_collections(context):
     return collections
 
 
+def _append_unique_collection(collections, seen, collection):
+    if collection is None:
+        return
+
+    collection_key = collection.as_pointer()
+    if collection_key in seen:
+        return
+
+    collections.append(collection)
+    seen.add(collection_key)
+
+
+def _mirror_selected_id_collections(selected_ids, collections, seen):
+    for selected_id in selected_ids or ():
+        if not isinstance(selected_id, bpy.types.Collection):
+            continue
+        _append_unique_collection(collections, seen, selected_id)
+
+
+def _mirror_outliner_selected_collections(context, collections, seen):
+    screen = getattr(context, "screen", None)
+    if screen is None:
+        return
+
+    for area in screen.areas:
+        if area.type != "OUTLINER":
+            continue
+
+        window_region = next((region for region in area.regions if region.type == "WINDOW"), None)
+        if window_region is None:
+            continue
+
+        try:
+            with context.temp_override(area=area, region=window_region):
+                selected_ids = getattr(bpy.context, "selected_ids", ()) or ()
+        except (AttributeError, TypeError, RuntimeError):
+            continue
+
+        _mirror_selected_id_collections(selected_ids, collections, seen)
+
+
 def _mirror_context_collections(context):
     collections = []
     seen = set()
 
-    try:
-        selected_ids = getattr(context, "selected_ids", ()) or ()
-    except AttributeError:
-        selected_ids = ()
-
-    for selected_id in selected_ids:
-        if not isinstance(selected_id, bpy.types.Collection):
-            continue
-
-        collection_key = selected_id.as_pointer()
-        if collection_key in seen:
-            continue
-        collections.append(selected_id)
-        seen.add(collection_key)
+    _mirror_selected_context_collections(context, collections, seen)
 
     if collections:
         return collections
@@ -159,12 +187,33 @@ def _mirror_context_collections(context):
         fallback_collection = context.view_layer.active_layer_collection.collection
 
     if fallback_collection is not None:
-        collections.append(fallback_collection)
+        _append_unique_collection(collections, seen, fallback_collection)
+
+    return collections
+
+
+def _mirror_selected_context_collections(context, collections=None, seen=None):
+    if collections is None:
+        collections = []
+    if seen is None:
+        seen = set()
+
+    try:
+        selected_ids = getattr(context, "selected_ids", ()) or ()
+    except AttributeError:
+        selected_ids = ()
+
+    _mirror_selected_id_collections(selected_ids, collections, seen)
+    _mirror_outliner_selected_collections(context, collections, seen)
 
     return collections
 
 
 def _mirror_collection_scope(context):
+    selected_context_collections = _mirror_selected_context_collections(context)
+    if selected_context_collections:
+        return [(collection, True) for collection in selected_context_collections]
+
     selected_curve_collections = _mirror_selected_curve_collections(context)
     if selected_curve_collections:
         return [(collection, False) for collection in selected_curve_collections]
