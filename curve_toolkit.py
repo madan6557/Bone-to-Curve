@@ -137,7 +137,7 @@ def _mirror_context_collections(context):
     seen = set()
 
     try:
-        selected_ids = getattr(context, "selected_ids", ())
+        selected_ids = getattr(context, "selected_ids", ()) or ()
     except AttributeError:
         selected_ids = ()
 
