@@ -896,221 +896,158 @@ def _copy_spline(source_spline, target_curve):
     return target_spline
 
 
-def _component_paths_from_mesh(mesh, matrix_world):
-    if not mesh.vertices:
+def _shortest_arc_angle_delta(start_angle, end_angle):
+    diff = (end_angle - start_angle) % (2.0 * pi)
+    if diff > pi:
+        diff -= 2.0 * pi
+    return diff
+
+
+def _interpolate_tilt(tilt0, tilt1, factor):
+    delta = _shortest_arc_angle_delta(tilt0, tilt1)
+    return tilt0 + delta * factor
+
+
+def _eval_cubic_bezier(p0, h0, h1, p1, t):
+    om_t = 1.0 - t
+    return (
+        p0 * (om_t ** 3)
+        + h0 * (3.0 * (om_t ** 2) * t)
+        + h1 * (3.0 * om_t * (t ** 2))
+        + p1 * (t ** 3)
+    )
+
+
+def _eval_cubic_bezier_deriv(p0, h0, h1, p1, t):
+    om_t = 1.0 - t
+    d0 = (h0 - p0) * 3.0
+    d1 = (h1 - h0) * 3.0
+    d2 = (p1 - h1) * 3.0
+    return d0 * (om_t ** 2) + d1 * (2.0 * om_t * t) + d2 * (t ** 2)
+
+
+def _split_bezier_segment_de_casteljau(p0, hr0, hl1, p1, cuts, r0, r1, tilt0, tilt1, w0, w1):
+    if cuts < 1:
+        return [], hr0.copy(), hl1.copy()
+
+    t_vals = [i / (cuts + 1) for i in range(cuts + 2)]
+    intermediate_points = []
+
+    d0 = _eval_cubic_bezier_deriv(p0, hr0, hl1, p1, 0.0)
+    updated_first_hr = p0 + d0 * (t_vals[1] / 3.0)
+
+    d_end = _eval_cubic_bezier_deriv(p0, hr0, hl1, p1, 1.0)
+    updated_last_hl = p1 - d_end * ((1.0 - t_vals[cuts]) / 3.0)
+
+    for i in range(1, cuts + 1):
+        t = t_vals[i]
+        dt_left = t - t_vals[i - 1]
+        dt_right = t_vals[i + 1] - t
+
+        pos = _eval_cubic_bezier(p0, hr0, hl1, p1, t)
+        deriv = _eval_cubic_bezier_deriv(p0, hr0, hl1, p1, t)
+
+        h_left = pos - deriv * (dt_left / 3.0)
+        h_right = pos + deriv * (dt_right / 3.0)
+
+        radius = r0 + (r1 - r0) * t
+        tilt = _interpolate_tilt(tilt0, tilt1, t)
+        softbody = w0 + (w1 - w0) * t
+
+        intermediate_points.append({
+            "co": pos,
+            "handle_left": h_left,
+            "handle_right": h_right,
+            "handle_left_type": "FREE",
+            "handle_right_type": "FREE",
+            "tilt": tilt,
+            "radius": radius,
+            "weight_softbody": softbody,
+            "select_control_point": True,
+            "select_left_handle": True,
+            "select_right_handle": True,
+        })
+
+    return intermediate_points, updated_first_hr, updated_last_hl
+
+
+def _evaluated_spline_path_points(_context, curve_obj, spline, dense_samples_per_segment=24):
+    if spline is None:
         return []
+    matrix_world = curve_obj.matrix_world if curve_obj is not None else None
 
-    adjacency = {index: [] for index in range(len(mesh.vertices))}
-    for edge in mesh.edges:
-        first, second = edge.vertices
-        adjacency[first].append(second)
-        adjacency[second].append(first)
+    if spline.type == "BEZIER":
+        points = spline.bezier_points
+        if len(points) < 2:
+            return [matrix_world @ p.co if matrix_world else p.co.copy() for p in points]
 
-    if not mesh.edges:
-        return [[matrix_world @ vertex.co for vertex in mesh.vertices]]
+        resolution = max(4, dense_samples_per_segment)
+        sampled_path = []
+        seg_count = len(points) - 1
 
-    visited_vertices = set()
-    paths = []
+        for i in range(seg_count):
+            p0 = points[i].co
+            h0 = points[i].handle_right
+            h1 = points[i + 1].handle_left
+            p1 = points[i + 1].co
 
-    for start_index in range(len(mesh.vertices)):
-        if start_index in visited_vertices:
-            continue
+            for step in range(resolution):
+                t = step / resolution
+                pos = _eval_cubic_bezier(p0, h0, h1, p1, t)
+                if matrix_world:
+                    sampled_path.append(matrix_world @ pos)
+                else:
+                    sampled_path.append(pos)
 
-        stack = [start_index]
-        component = set()
-        while stack:
-            vertex_index = stack.pop()
-            if vertex_index in component:
-                continue
-            component.add(vertex_index)
-            stack.extend(adjacency[vertex_index])
+        last_p = points[-1].co
+        if matrix_world:
+            sampled_path.append(matrix_world @ last_p)
+        else:
+            sampled_path.append(last_p.copy())
 
-        visited_vertices.update(component)
-        endpoints = [index for index in component if len(adjacency[index]) <= 1]
-        current = min(endpoints or component)
-        previous = None
-        ordered_indices = [current]
-        visited_edges = set()
+        return sampled_path
 
-        while True:
-            next_index = None
-            for neighbor in sorted(adjacency[current]):
-                edge_key = tuple(sorted((current, neighbor)))
-                if neighbor == previous or edge_key in visited_edges:
-                    continue
-                next_index = neighbor
-                visited_edges.add(edge_key)
-                break
+    elif spline.type == "POLY":
+        points = spline.points
+        if matrix_world:
+            return [matrix_world @ Vector((p.co[0], p.co[1], p.co[2])) for p in points]
+        return [Vector((p.co[0], p.co[1], p.co[2])) for p in points]
 
-            if next_index is None:
-                break
+    elif spline.type == "NURBS":
+        point_count = len(spline.points)
+        if point_count < 2:
+            if matrix_world:
+                return [matrix_world @ Vector((p.co[0], p.co[1], p.co[2])) for p in spline.points]
+            return [Vector((p.co[0], p.co[1], p.co[2])) for p in spline.points]
 
-            previous = current
-            current = next_index
-            ordered_indices.append(current)
+        order = max(2, min(int(getattr(spline, "order_u", 2)), point_count))
+        degree = order - 1
+        use_endpoint = bool(getattr(spline, "use_endpoint_u", False))
+        knots = _nurbs_knot_vector(point_count, degree, use_endpoint)
+        if knots is None:
+            if matrix_world:
+                return [matrix_world @ Vector((p.co[0], p.co[1], p.co[2])) for p in spline.points]
+            return [Vector((p.co[0], p.co[1], p.co[2])) for p in spline.points]
 
-            if current == ordered_indices[0]:
-                break
+        local_pts = [Vector((p.co[0], p.co[1], p.co[2])) for p in spline.points]
+        weights = [max(MIN_BONE_LENGTH, float(p.co[3])) for p in spline.points]
+        sample_count = max(point_count * dense_samples_per_segment, 64)
+        sampled_path = []
 
-        paths.append([matrix_world @ mesh.vertices[index].co for index in ordered_indices])
+        for step in range(sample_count):
+            u = step / (sample_count - 1)
+            basis = _rational_nurbs_basis_values(point_count, degree, knots, weights, u)
+            pos = Vector((0.0, 0.0, 0.0))
+            for pt, w_basis in zip(local_pts, basis):
+                pos += pt * w_basis
+            if matrix_world:
+                sampled_path.append(matrix_world @ pos)
+            else:
+                sampled_path.append(pos)
 
-    return sorted(paths, key=lambda path: len(path), reverse=True)
+        return sampled_path
 
-
-def _mesh_axis_path_points(mesh, matrix_world):
-    if not mesh.vertices:
-        return []
-
-    edges = list(mesh.edges)
-    if not edges:
-        return [[matrix_world @ vertex.co for vertex in mesh.vertices]]
-
-    adjacency = {index: set() for index in range(len(mesh.vertices))}
-    for edge in edges:
-        first, second = edge.vertices
-        adjacency[first].add(second)
-        adjacency[second].add(first)
-
-    visited_vertices = set()
-    paths = []
-    for start_index in range(len(mesh.vertices)):
-        if start_index in visited_vertices:
-            continue
-
-        stack = [start_index]
-        component = set()
-        while stack:
-            vertex_index = stack.pop()
-            if vertex_index in component:
-                continue
-            component.add(vertex_index)
-            stack.extend(adjacency[vertex_index])
-
-        visited_vertices.update(component)
-        component_edges = [edge for edge in edges if edge.vertices[0] in component and edge.vertices[1] in component]
-        if len(component) < 2 or not component_edges:
-            continue
-
-        if max(len(adjacency[index]) for index in component) <= 2:
-            endpoints = [index for index in component if len(adjacency[index]) <= 1]
-            current = min(endpoints or component)
-            previous = None
-            ordered_indices = [current]
-            visited_edges = set()
-
-            while True:
-                next_index = None
-                for neighbor in sorted(adjacency[current]):
-                    edge_key = tuple(sorted((current, neighbor)))
-                    if neighbor == previous or edge_key in visited_edges:
-                        continue
-                    next_index = neighbor
-                    visited_edges.add(edge_key)
-                    break
-
-                if next_index is None:
-                    break
-
-                previous = current
-                current = next_index
-                ordered_indices.append(current)
-
-                if current == ordered_indices[0]:
-                    break
-
-            paths.append([matrix_world @ mesh.vertices[index].co for index in ordered_indices])
-            continue
-
-        degree_groups = {}
-        for vertex_index in component:
-            degree_groups.setdefault(len(adjacency[vertex_index]), []).append(vertex_index)
-        edge_count = max(len(component_edges), 1)
-        likely_ring_size = max(degree_groups.items(), key=lambda item: (len(item[1]), item[0]))[0]
-        ring_count = max(2, round(len(component) / max(1, likely_ring_size)))
-
-        candidates = []
-        for group_count in range(max(2, ring_count - 2), ring_count + 3):
-            if group_count > len(component):
-                continue
-
-            axis = max(0, min(2, max(range(3), key=lambda axis_index: max(
-                (mesh.vertices[index].co[axis_index] for index in component),
-                default=0.0,
-            ) - min(
-                (mesh.vertices[index].co[axis_index] for index in component),
-                default=0.0,
-            ))))
-            ordered = sorted(component, key=lambda index: mesh.vertices[index].co[axis])
-            groups = [[] for _ in range(group_count)]
-            for order_index, vertex_index in enumerate(ordered):
-                bucket = min(group_count - 1, int(order_index * group_count / len(ordered)))
-                groups[bucket].append(vertex_index)
-            if any(not group for group in groups):
-                continue
-
-            grouped_edges = 0
-            cross_edges = 0
-            vertex_to_group = {}
-            centers = []
-            for group_index, group in enumerate(groups):
-                center = Vector((0.0, 0.0, 0.0))
-                for vertex_index in group:
-                    vertex_to_group[vertex_index] = group_index
-                    center += mesh.vertices[vertex_index].co
-                centers.append(center / len(group))
-
-            for edge in component_edges:
-                first_group = vertex_to_group[edge.vertices[0]]
-                second_group = vertex_to_group[edge.vertices[1]]
-                if first_group == second_group:
-                    grouped_edges += 1
-                elif abs(first_group - second_group) == 1:
-                    cross_edges += 1
-
-            score = grouped_edges * 2 + cross_edges - abs(group_count - ring_count) * 0.25
-            candidates.append((score, centers))
-
-        if not candidates:
-            continue
-
-        centers = max(candidates, key=lambda item: item[0])[1]
-        paths.append([matrix_world @ center for center in centers])
-
-    return sorted(paths, key=lambda path: len(path), reverse=True)
-
-
-def _evaluated_spline_path_points(context, curve_obj, spline):
-    temp_curve = bpy.data.curves.new(f"{curve_obj.name}_path_eval", "CURVE")
-    temp_obj = None
-    eval_obj = None
-
-    try:
-        _copy_curve_settings(curve_obj.data, temp_curve)
-        _copy_spline(spline, temp_curve)
-
-        temp_obj = bpy.data.objects.new(f"{curve_obj.name}_path_eval", temp_curve)
-        temp_obj.matrix_world = curve_obj.matrix_world.copy()
-        _link_target_collection(context, curve_obj).objects.link(temp_obj)
-        context.view_layer.update()
-
-        depsgraph = context.evaluated_depsgraph_get()
-        eval_obj = temp_obj.evaluated_get(depsgraph)
-        mesh = eval_obj.to_mesh()
-        try:
-            paths = _mesh_axis_path_points(mesh, temp_obj.matrix_world)
-            if not paths:
-                paths = _component_paths_from_mesh(mesh, temp_obj.matrix_world)
-        finally:
-            eval_obj.to_mesh_clear()
-
-        if not paths:
-            return []
-
-        return paths[0]
-    finally:
-        if temp_obj is not None:
-            bpy.data.objects.remove(temp_obj, do_unlink=True)
-        bpy.data.curves.remove(temp_curve, do_unlink=True)
+    return []
 
 
 def _has_valid_segment(points):
@@ -1294,12 +1231,13 @@ def _control_distances_on_path(curve_obj, spline, indices, path_points):
     point_count = _control_point_count(spline)
     points = list(_spline_points(spline))
     distances = []
+    full_selection = (len(indices) == point_count and indices == list(range(point_count)))
 
     for index in indices:
-        if index == 0:
+        if full_selection and index == 0:
             distances.append(0.0)
             continue
-        if index == point_count - 1:
+        if full_selection and index == point_count - 1:
             distances.append(total_length)
             continue
 
@@ -1337,6 +1275,30 @@ def _sample_scalar_by_distance(source_distances, values, target_distance):
             return values[index] + (values[index + 1] - values[index]) * factor
 
     return values[-1]
+
+
+def _sample_angle_by_distance(source_distances, angles, target_distance):
+    if not source_distances or not angles:
+        return 0.0
+    if len(source_distances) == 1:
+        return angles[0]
+
+    if target_distance <= source_distances[0]:
+        return angles[0]
+    if target_distance >= source_distances[-1]:
+        return angles[-1]
+
+    for index in range(len(source_distances) - 1):
+        start_distance = source_distances[index]
+        end_distance = source_distances[index + 1]
+        if end_distance - start_distance <= MIN_BONE_LENGTH:
+            continue
+        if target_distance <= end_distance:
+            factor = (target_distance - start_distance) / (end_distance - start_distance)
+            delta = _shortest_arc_angle_delta(angles[index], angles[index + 1])
+            return angles[index] + delta * factor
+
+    return angles[-1]
 
 
 def _path_weighted_distances(path_points, start_distance, end_distance, point_count, curvature_bias):
@@ -1791,7 +1753,7 @@ def _apply_segment_distribution(context, curve_obj, spline, indices, mode, curva
     for index, target_distance in zip(indices, target_distances):
         point = points[index]
         _set_point_radius(point, _sample_scalar_by_distance(source_distances, radii, target_distance))
-        _set_point_tilt(point, _sample_scalar_by_distance(source_distances, tilts, target_distance))
+        _set_point_tilt(point, _sample_angle_by_distance(source_distances, tilts, target_distance))
 
     if mode == "FIT" and spline.type == "BEZIER":
         _reset_bezier_handles_for_indices(spline, _affected_bezier_indices(len(points), indices))
@@ -2031,7 +1993,7 @@ def _decimate_state_at_distance(curve_obj, spline, states, source_distances, pat
     target_world = _point_at_distance(path_points, target_distance)
     target_local = curve_obj.matrix_world.inverted() @ target_world
     radius = first["radius"] + (second["radius"] - first["radius"]) * factor
-    tilt = first["tilt"] + (second["tilt"] - first["tilt"]) * factor
+    tilt = _interpolate_tilt(first["tilt"], second["tilt"], factor)
     weight_softbody = first["weight_softbody"] + (second["weight_softbody"] - first["weight_softbody"]) * factor
 
     if spline.type == "BEZIER":
@@ -2301,72 +2263,109 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
     if point_count < 2:
         return 0
 
-    states = [_bezier_state_from_point(point) for point in points] if spline.type == "BEZIER" else [_curve_state_from_point(point) for point in points]
     selected_segments = {index for run in selected_runs for index in range(run[0], run[-1])}
     total_length = _polyline_length(path_points)
-    control_distances = _control_distances_on_path(curve_obj, spline, list(range(point_count)), path_points)
-    old_to_new = {}
-    new_states = []
 
-    for index, state in enumerate(states):
-        old_to_new[index] = len(new_states)
-        new_states.append(state)
+    if spline.type == "BEZIER":
+        states = [_bezier_state_from_point(point) for point in points]
+        old_to_new = {}
+        new_states = []
 
-        if index not in selected_segments or index + 1 >= point_count:
-            continue
+        for index in range(point_count):
+            old_to_new[index] = len(new_states)
+            new_states.append(states[index])
 
-        start_distance = _path_distance_for_segment(control_distances, index, total_length, point_count)
-        end_distance = _path_distance_for_segment(control_distances, index + 1, total_length, point_count)
-        if end_distance - start_distance <= MIN_BONE_LENGTH:
-            start_distance = _fallback_node_distance(total_length, point_count, index)
-            end_distance = _fallback_node_distance(total_length, point_count, index + 1)
+            if index in selected_segments and index + 1 < point_count:
+                p0 = states[index]["co"]
+                hr0 = states[index]["handle_right"]
+                hl1 = states[index + 1]["handle_left"]
+                p1 = states[index + 1]["co"]
+                r0 = states[index]["radius"]
+                r1 = states[index + 1]["radius"]
+                t0 = states[index]["tilt"]
+                t1 = states[index + 1]["tilt"]
+                w0 = states[index]["weight_softbody"]
+                w1 = states[index + 1]["weight_softbody"]
 
-        start_world = curve_obj.matrix_world @ _point_local_co(points[index], spline)
-        end_world = curve_obj.matrix_world @ _point_local_co(points[index + 1], spline)
-        for cut_index in range(1, cuts + 1):
-            factor = cut_index / (cuts + 1)
-            target_distance = start_distance + (end_distance - start_distance) * factor
-            if len(path_points) >= 2 and _has_valid_segment(path_points):
-                target_world = _point_at_distance(path_points, target_distance)
-            else:
-                target_world = start_world.lerp(end_world, factor)
-            new_states.append(_subdivide_insert_state(curve_obj, spline, states[index], states[index + 1], factor, target_world))
+                sub_pts, new_hr0, new_hl1 = _split_bezier_segment_de_casteljau(
+                    p0, hr0, hl1, p1, cuts, r0, r1, t0, t1, w0, w1
+                )
+                new_states[old_to_new[index]]["handle_right"] = new_hr0
+                states[index + 1]["handle_left"] = new_hl1
+                new_states.extend(sub_pts)
 
-    if len(new_states) == len(states):
-        return 0
+        if len(new_states) == len(states):
+            return 0
 
-    _assign_spline_states(spline, new_states)
-    expanded_runs = [list(range(old_to_new[run[0]], old_to_new[run[-1]] + 1)) for run in selected_runs]
+        _assign_spline_states(spline, new_states)
+        expanded_runs = [list(range(old_to_new[run[0]], old_to_new[run[-1]] + 1)) for run in selected_runs]
+        changed_count = len(new_states) - len(states)
 
-    changed_count = len(new_states) - len(states)
-    if distribution_mode != "NONE":
-        for run in expanded_runs:
-            changed_count += _apply_segment_distribution(
-                context,
-                curve_obj,
-                spline,
-                run,
-                distribution_mode,
-                curvature_bias,
-                path_points,
-            )
-    elif spline.type == "BEZIER":
-        for run in expanded_runs:
-            _path_points, source_distances = _distribution_path_for_indices(context, curve_obj, spline, run, "FIT", path_points)
-            _fit_bezier_handles_to_path(curve_obj, spline, run, source_distances, path_points)
-    elif spline.type == "NURBS" and len(expanded_runs) == 1 and expanded_runs[0] == list(range(len(new_states))):
-        target_distances = _segment_distribution_distances(
-            path_points,
-            [0.0, total_length],
-            len(new_states),
-            "EVEN",
-            curvature_bias,
-        )
-        target_positions = [_point_at_distance(path_points, distance) for distance in target_distances]
-        target_parameters = _normalized_parameters_from_distances(target_distances, total_length)
-        _apply_nurbs_interpolated_positions(curve_obj, spline, expanded_runs[0], target_positions, target_parameters)
+        if distribution_mode != "NONE":
+            for run in expanded_runs:
+                changed_count += _apply_segment_distribution(
+                    context,
+                    curve_obj,
+                    spline,
+                    run,
+                    distribution_mode,
+                    curvature_bias,
+                    path_points,
+                )
 
-    return changed_count
+        return changed_count
+
+    else:
+        states = [_curve_state_from_point(point) for point in points]
+        control_distances = _control_distances_on_path(curve_obj, spline, list(range(point_count)), path_points)
+        old_to_new = {}
+        new_states = []
+
+        for index in range(point_count):
+            old_to_new[index] = len(new_states)
+            new_states.append(states[index])
+
+            if index not in selected_segments or index + 1 >= point_count:
+                continue
+
+            start_distance = _path_distance_for_segment(control_distances, index, total_length, point_count)
+            end_distance = _path_distance_for_segment(control_distances, index + 1, total_length, point_count)
+            if end_distance - start_distance <= MIN_BONE_LENGTH:
+                start_distance = _fallback_node_distance(total_length, point_count, index)
+                end_distance = _fallback_node_distance(total_length, point_count, index + 1)
+
+            start_world = curve_obj.matrix_world @ _point_local_co(points[index], spline)
+            end_world = curve_obj.matrix_world @ _point_local_co(points[index + 1], spline)
+
+            for cut_index in range(1, cuts + 1):
+                factor = cut_index / (cuts + 1)
+                target_distance = start_distance + (end_distance - start_distance) * factor
+                if len(path_points) >= 2 and _has_valid_segment(path_points):
+                    target_world = _point_at_distance(path_points, target_distance)
+                else:
+                    target_world = start_world.lerp(end_world, factor)
+                new_states.append(_subdivide_insert_state(curve_obj, spline, states[index], states[index + 1], factor, target_world))
+
+        if len(new_states) == len(states):
+            return 0
+
+        _assign_spline_states(spline, new_states)
+        expanded_runs = [list(range(old_to_new[run[0]], old_to_new[run[-1]] + 1)) for run in selected_runs]
+        changed_count = len(new_states) - len(states)
+
+        if distribution_mode != "NONE":
+            for run in expanded_runs:
+                changed_count += _apply_segment_distribution(
+                    context,
+                    curve_obj,
+                    spline,
+                    run,
+                    distribution_mode,
+                    curvature_bias,
+                    path_points,
+                )
+
+        return changed_count
 
 
 def _integrated_curvature_scores(path_points, distances):
