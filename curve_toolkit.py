@@ -2607,6 +2607,48 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
         expanded_runs = [list(range(old_to_new[run[0]], old_to_new[run[-1]] + 1)) for run in selected_runs]
         changed_count = len(new_states) - len(states)
 
+        # ------------------------------------------------------------------
+        # Phase 2: Refit all points in each expanded run (+ outer context)
+        # directly onto the drawn path to eliminate valleys.
+        # Applies to NurbsPath and all non-BEZIER spline types.
+        # ------------------------------------------------------------------
+        settings = context.scene.curve_toolkit if context and hasattr(context.scene, "curve_toolkit") else None
+        auto_smooth = getattr(settings, "subdivide_auto_smooth", True) if settings else True
+
+        if auto_smooth and len(path_points) >= 2:
+            total_pts = _control_point_count(spline)
+            matrix_world = curve_obj.matrix_world
+            matrix_inv = matrix_world.inverted()
+            new_points = list(_spline_points(spline))
+
+            for run in expanded_runs:
+                # Include one outer neighbor at each side for seamless transition
+                ctx_start = max(0, run[0] - 1)
+                ctx_end = min(total_pts - 1, run[-1] + 1)
+                ctx_run = list(range(ctx_start, ctx_end + 1))
+
+                if len(ctx_run) < 3:
+                    continue
+
+                # Find arc-length positions of outer anchor points (not moved)
+                anchor_left_world = matrix_world @ _point_local_co(new_points[ctx_run[0]], spline)
+                anchor_right_world = matrix_world @ _point_local_co(new_points[ctx_run[-1]], spline)
+                s_left = _distance_on_path_nearest(path_points, anchor_left_world)
+                s_right = _distance_on_path_nearest(path_points, anchor_right_world)
+
+                if s_right <= s_left:
+                    continue
+
+                # Re-position all interior points to equal arc-length on drawn path
+                interior = ctx_run[1:-1]
+                count = len(interior)
+                for local_i, idx in enumerate(interior):
+                    t = (local_i + 1) / (count + 1)
+                    s = s_left + (s_right - s_left) * t
+                    world_pos = _point_at_distance(path_points, s)
+                    local_pos = matrix_inv @ world_pos
+                    _set_point_local_co(new_points[idx], spline, local_pos)
+
         if distribution_mode != "NONE":
             for run in expanded_runs:
                 changed_count += _apply_segment_distribution(

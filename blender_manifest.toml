@@ -1,6 +1,6 @@
-schema_version = "1.9.7"
+schema_version = "1.9.8"
 id = "curve_toolkit"
-version = "1.9.7"
+version = "1.9.8"
 name = "Curve Toolkit"
 tagline = "Curve modeling tools and bone chain generation"
 maintainer = "madan6557"
