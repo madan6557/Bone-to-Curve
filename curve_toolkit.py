@@ -5560,6 +5560,118 @@ class CTK_OT_snap_cursor(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CTK_OT_segment_quick_subdivide(bpy.types.Operator):
+    bl_idname = "curve_toolkit.segment_quick_subdivide"
+    bl_label = "Quick Subdivide"
+    bl_description = "Subdivide selected curve segments with exact shape preservation"
+    bl_options = {"REGISTER", "UNDO"}
+
+    cuts: bpy.props.IntProperty(name="Cuts", default=1, min=1, max=16)
+
+    @classmethod
+    def poll(cls, context):
+        return _active_curve(context) is not None
+
+    def execute(self, context):
+        curve_obj, _splines = _require_editable_open_curve(self, context)
+        if curve_obj is None:
+            return {"CANCELLED"}
+
+        settings = context.scene.curve_toolkit
+        previous_mode = curve_obj.mode
+        _set_active_only(context, curve_obj)
+        if curve_obj.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+
+        splines = _editable_splines(curve_obj)
+        has_valid_segment = any(
+            len(run) >= 2 for spline in splines for run in _selected_index_runs(spline)
+        )
+        if not has_valid_segment:
+            if previous_mode != "OBJECT":
+                bpy.ops.object.mode_set(mode=previous_mode)
+            self.report({"ERROR"}, "Select at least 2 adjacent curve points to subdivide.")
+            return {"CANCELLED"}
+
+        added_count = 0
+        try:
+            for spline in splines:
+                if not any(len(run) >= 2 for run in _selected_index_runs(spline)):
+                    continue
+                path_points = _evaluated_spline_path_points(context, curve_obj, spline)
+                added_count += _subdivide_selected_spline_data(
+                    context,
+                    curve_obj,
+                    spline,
+                    self.cuts,
+                    "NONE",
+                    settings.curvature_bias,
+                    path_points,
+                )
+        except Exception as exc:
+            if curve_obj.mode != "OBJECT":
+                bpy.ops.object.mode_set(mode="OBJECT")
+            if previous_mode != "OBJECT":
+                bpy.ops.object.mode_set(mode=previous_mode)
+            self.report({"ERROR"}, f"Subdivide failed: {exc}")
+            return {"CANCELLED"}
+
+        context.view_layer.update()
+        if previous_mode != "OBJECT":
+            bpy.ops.object.mode_set(mode=previous_mode)
+
+        _clear_ctk_previews("SEGMENT")
+        _store_current_preview_signature(context, "SEGMENT")
+        self.report({"INFO"}, f"Added {added_count} curve points (+{self.cuts} cut{'s' if self.cuts > 1 else ''} per segment).")
+        return {"FINISHED"}
+
+
+class CTK_OT_select_curve_segment(bpy.types.Operator):
+    bl_idname = "curve_toolkit.select_curve_segment"
+    bl_label = "Select Segment"
+    bl_description = "Select root or tip segment (first 2 or last 2 points) of active curve splines"
+    bl_options = {"REGISTER", "UNDO"}
+
+    mode: bpy.props.EnumProperty(
+        name="Mode",
+        items=(
+            ("ROOT", "Root Segment", "Select the first 2 points (root segment)"),
+            ("TIP", "Tip Segment", "Select the last 2 points (tip segment)"),
+        ),
+        default="ROOT",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_target_curve_objects(context))
+
+    def execute(self, context):
+        changed_count = 0
+        for curve_obj in _target_curve_objects(context):
+            for spline in _editable_splines(curve_obj):
+                points = list(_spline_points(spline))
+                point_count = len(points)
+                if point_count < 2:
+                    continue
+
+                for index, point in enumerate(points):
+                    selected = (
+                        (self.mode == "ROOT" and index in (0, 1))
+                        or (self.mode == "TIP" and index in (point_count - 2, point_count - 1))
+                    )
+                    if spline.type == "BEZIER":
+                        point.select_control_point = selected
+                        point.select_left_handle = selected
+                        point.select_right_handle = selected
+                    else:
+                        point.select = selected
+                    changed_count += int(selected)
+
+        label = "root" if self.mode == "ROOT" else "tip"
+        self.report({"INFO"}, f"Selected {label} segment on {len(_target_curve_objects(context))} curve(s).")
+        return {"FINISHED"}
+
+
 class CTK_OT_segment_distribute(bpy.types.Operator):
     bl_idname = "curve_toolkit.segment_distribute"
     bl_label = "Distribute Segments"
@@ -7390,6 +7502,22 @@ class CTK_PT_tools(bpy.types.Panel):
             if settings.segment_preview_status:
                 segment_column.label(text=settings.segment_preview_status, icon="INFO")
 
+            quick_box = segment_column.box()
+            quick_box.label(text="Quick Section Density (Hair)", icon="HAIR")
+            row = quick_box.row(align=True)
+            op = row.operator(CTK_OT_select_curve_segment.bl_idname, text="Select Root")
+            op.mode = "ROOT"
+            op = row.operator(CTK_OT_select_curve_segment.bl_idname, text="Select Tip")
+            op.mode = "TIP"
+
+            row = quick_box.row(align=True)
+            op = row.operator(CTK_OT_segment_quick_subdivide.bl_idname, text="+1 Cut")
+            op.cuts = 1
+            op = row.operator(CTK_OT_segment_quick_subdivide.bl_idname, text="+2 Cuts")
+            op.cuts = 2
+            op = row.operator(CTK_OT_segment_quick_subdivide.bl_idname, text="+3 Cuts")
+            op.cuts = 3
+
             segment_column.separator()
             segment_column.label(text="Raw Distribution")
             segment_column.prop(settings, "distribution_mode")
@@ -7733,6 +7861,8 @@ classes = (
     CTK_OT_switch_direction,
     CTK_OT_set_origin,
     CTK_OT_snap_cursor,
+    CTK_OT_segment_quick_subdivide,
+    CTK_OT_select_curve_segment,
     CTK_OT_segment_distribute,
     CTK_OT_segment_subdivide_selected,
     CTK_OT_segment_decimate_selected,
