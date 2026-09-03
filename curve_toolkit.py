@@ -926,6 +926,51 @@ def _eval_cubic_bezier_deriv(p0, h0, h1, p1, t):
     return d0 * (om_t ** 2) + d1 * (2.0 * om_t * t) + d2 * (t ** 2)
 
 
+def _fit_cubic_bezier_handles_least_squares(p0, t0, p1, t1, sample_pts):
+    if not sample_pts:
+        chord_len = (p1 - p0).length / 3.0
+        return p0 + t0 * chord_len, p1 - t1 * chord_len
+
+    n = len(sample_pts)
+    c00 = 0.0
+    c01 = 0.0
+    c11 = 0.0
+    x0 = 0.0
+    x1 = 0.0
+
+    for i, pt in enumerate(sample_pts):
+        u = (i + 1) / (n + 1)
+        b0 = (1.0 - u) ** 3
+        b1 = 3.0 * ((1.0 - u) ** 2) * u
+        b2 = 3.0 * (1.0 - u) * (u ** 2)
+        b3 = u ** 3
+
+        a1 = t0 * b1
+        a2 = t1 * (-b2)
+
+        c00 += a1.dot(a1)
+        c01 += a1.dot(a2)
+        c11 += a2.dot(a2)
+
+        diff = pt - (p0 * (b0 + b1) + p1 * (b2 + b3))
+        x0 += a1.dot(diff)
+        x1 += a2.dot(diff)
+
+    det = c00 * c11 - c01 * c01
+    chord_len = (p1 - p0).length / 3.0
+    if abs(det) < 1e-8:
+        alpha = chord_len
+        beta = chord_len
+    else:
+        alpha = (x0 * c11 - x1 * c01) / det
+        beta = (c00 * x1 - c01 * x0) / det
+        if alpha <= 0.0 or beta <= 0.0 or alpha > (p1 - p0).length * 1.5 or beta > (p1 - p0).length * 1.5:
+            alpha = chord_len
+            beta = chord_len
+
+    return p0 + t0 * alpha, p1 - t1 * beta
+
+
 def _split_segment_smooth_curvature(
     p_prev, p0, p1, p_next,
     cuts,
@@ -2351,18 +2396,43 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
 
     if spline.type == "BEZIER":
         states = [_bezier_state_from_point(point) for point in points]
+        control_distances = _control_distances_on_path(curve_obj, spline, list(range(point_count)), path_points)
         old_to_new = {}
         new_states = []
+        matrix_inv = curve_obj.matrix_world.inverted()
 
         for index in range(point_count):
             old_to_new[index] = len(new_states)
             new_states.append(states[index])
 
             if index in selected_segments and index + 1 < point_count:
-                p0 = states[index]["co"]
-                hr0 = states[index]["handle_right"]
-                hl1 = states[index + 1]["handle_left"]
-                p1 = states[index + 1]["co"]
+                s_start = _path_distance_for_segment(control_distances, index, total_length, point_count)
+                s_end = _path_distance_for_segment(control_distances, index + 1, total_length, point_count)
+                if s_end - s_start <= MIN_BONE_LENGTH:
+                    s_start = _fallback_node_distance(total_length, point_count, index)
+                    s_end = _fallback_node_distance(total_length, point_count, index + 1)
+
+                seg_dists = [s_start + (s_end - s_start) * i / (cuts + 1) for i in range(cuts + 2)]
+                
+                # Positions & Tangents in world space along original drawn path
+                world_positions = [_point_at_distance(path_points, d) for d in seg_dists]
+                world_tangents = [_path_tangent_at_distance(path_points, d) for d in seg_dists]
+                local_positions = [matrix_inv @ wp for wp in world_positions]
+                local_tangents = [(matrix_inv.to_3x3() @ wt).normalized() for wt in world_tangents]
+
+                # Update start point right handle
+                samples_first = [
+                    matrix_inv @ _point_at_distance(path_points, seg_dists[0] + (seg_dists[1] - seg_dists[0]) * (j + 1) / 6.0)
+                    for j in range(5)
+                ]
+                h_r0, h_l1 = _fit_cubic_bezier_handles_least_squares(
+                    local_positions[0], local_tangents[0],
+                    local_positions[1], local_tangents[1],
+                    samples_first
+                )
+                new_states[old_to_new[index]]["handle_right"] = h_r0
+                new_states[old_to_new[index]]["handle_right_type"] = "FREE"
+
                 r0 = states[index]["radius"]
                 r1 = states[index + 1]["radius"]
                 t0 = states[index]["tilt"]
@@ -2370,19 +2440,41 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
                 w0 = states[index]["weight_softbody"]
                 w1 = states[index + 1]["weight_softbody"]
 
-                p_prev = states[index - 1]["co"] if index > 0 else p0 - (p1 - p0)
-                p_next = states[index + 2]["co"] if index + 2 < point_count else p1 + (p1 - p0)
+                prev_h_left = h_l1
+                sub_pts = []
 
-                sub_pts, new_hr0, new_hl1 = _split_segment_smooth_curvature(
-                    p_prev, p0, p1, p_next,
-                    cuts,
-                    r0, r1, t0, t1, w0, w1,
-                    hr0=hr0, hl1=hl1,
-                    smooth_factor=1.0,
-                )
-                new_states[old_to_new[index]]["handle_right"] = new_hr0
-                new_states[old_to_new[index]]["handle_right_type"] = "FREE"
-                states[index + 1]["handle_left"] = new_hl1
+                for k in range(1, cuts + 1):
+                    t = k / (cuts + 1)
+                    samples_k = [
+                        matrix_inv @ _point_at_distance(path_points, seg_dists[k] + (seg_dists[k + 1] - seg_dists[k]) * (j + 1) / 6.0)
+                        for j in range(5)
+                    ]
+                    h_rk, next_h_left = _fit_cubic_bezier_handles_least_squares(
+                        local_positions[k], local_tangents[k],
+                        local_positions[k + 1], local_tangents[k + 1],
+                        samples_k
+                    )
+
+                    radius = r0 + (r1 - r0) * t
+                    tilt = _interpolate_tilt(t0, t1, t)
+                    softbody = w0 + (w1 - w0) * t
+
+                    sub_pts.append({
+                        "co": local_positions[k],
+                        "handle_left": prev_h_left,
+                        "handle_right": h_rk,
+                        "handle_left_type": "FREE",
+                        "handle_right_type": "FREE",
+                        "tilt": tilt,
+                        "radius": radius,
+                        "weight_softbody": softbody,
+                        "select_control_point": True,
+                        "select_left_handle": True,
+                        "select_right_handle": True,
+                    })
+                    prev_h_left = next_h_left
+
+                states[index + 1]["handle_left"] = prev_h_left
                 states[index + 1]["handle_left_type"] = "FREE"
                 new_states.extend(sub_pts)
 
