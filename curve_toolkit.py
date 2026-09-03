@@ -7827,7 +7827,7 @@ class CTK_PT_tools(bpy.types.Panel):
                 segment_column.label(text=settings.segment_preview_status, icon="INFO")
 
             quick_box = segment_column.box()
-            quick_box.label(text="Quick Section Density (Hair)", icon="CURVE_DATA")
+            quick_box.label(text="Quick Section Density", icon="CURVE_DATA")
             row = quick_box.row(align=True)
             op = row.operator(CTK_OT_select_curve_segment.bl_idname, text="Select Root")
             op.mode = "ROOT"
@@ -7841,6 +7841,11 @@ class CTK_PT_tools(bpy.types.Panel):
             op.cuts = 2
             op = row.operator(CTK_OT_segment_quick_subdivide.bl_idname, text="+3 Cuts")
             op.cuts = 3
+
+            smooth_toggle_row = quick_box.row(align=True)
+            smooth_toggle_row.prop(settings, "subdivide_auto_smooth", toggle=True)
+            if settings.subdivide_auto_smooth:
+                quick_box.prop(settings, "subdivide_smooth_factor", slider=True)
 
             segment_column.separator()
             segment_column.label(text="Raw Distribution")
