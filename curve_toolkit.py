@@ -7503,7 +7503,7 @@ class CTK_PT_tools(bpy.types.Panel):
                 segment_column.label(text=settings.segment_preview_status, icon="INFO")
 
             quick_box = segment_column.box()
-            quick_box.label(text="Quick Section Density (Hair)", icon="HAIR")
+            quick_box.label(text="Quick Section Density (Hair)", icon="CURVE_DATA")
             row = quick_box.row(align=True)
             op = row.operator(CTK_OT_select_curve_segment.bl_idname, text="Select Root")
             op.mode = "ROOT"
