@@ -785,8 +785,12 @@ def _apply_sampled_radius_values(points, indices, values):
 
 def _reset_bezier_handles_for_indices(spline, indices):
     points = list(spline.bezier_points)
+    n = len(points)
+    if n == 0:
+        return
+
     for index in sorted(indices):
-        if index < 0 or index >= len(points):
+        if index < 0 or index >= n:
             continue
 
         point = points[index]
@@ -794,14 +798,30 @@ def _reset_bezier_handles_for_indices(spline, indices):
         point.handle_right_type = "FREE"
 
         if index == 0:
-            point.handle_left = point.co
+            point.handle_left = point.co.copy()
+            if n > 1:
+                tangent = (points[1].co - point.co).normalized()
+                d_right = (points[1].co - point.co).length
+                point.handle_right = point.co + tangent * (d_right / 3.0)
+            else:
+                point.handle_right = point.co.copy()
+        elif index == n - 1:
+            point.handle_right = point.co.copy()
+            if n > 1:
+                tangent = (point.co - points[n - 2].co).normalized()
+                d_left = (point.co - points[n - 2].co).length
+                point.handle_left = point.co - tangent * (d_left / 3.0)
+            else:
+                point.handle_left = point.co.copy()
         else:
-            point.handle_left = point.co - (point.co - points[index - 1].co) / 3.0
-
-        if index == len(points) - 1:
-            point.handle_right = point.co
-        else:
-            point.handle_right = point.co + (points[index + 1].co - point.co) / 3.0
+            p_prev = points[index - 1].co
+            p_curr = point.co
+            p_next = points[index + 1].co
+            d_left = (p_curr - p_prev).length
+            d_right = (p_next - p_curr).length
+            tangent = (p_next - p_prev).normalized()
+            point.handle_left = p_curr - tangent * (d_left / 3.0)
+            point.handle_right = p_curr + tangent * (d_right / 3.0)
 
 
 def _require_editable_open_curve(operator, context):
@@ -2513,7 +2533,7 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
         if auto_smooth:
             total_pts = _control_point_count(spline)
             for run in expanded_runs:
-                # Expand run to include immediate neighbors for smooth curvature continuity
+                # Include outside boundary neighbors (P_0 - 1 and P_n + 1) for seamless transition
                 ctx_start = max(0, run[0] - 1)
                 ctx_end = min(total_pts - 1, run[-1] + 1)
                 ctx_run = list(range(ctx_start, ctx_end + 1))
@@ -2523,6 +2543,7 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
                     run_positions = {idx: positions[idx] for idx in ctx_run}
                     for _ in range(smooth_steps):
                         next_pos = dict(run_positions)
+                        # Smooth all points in selection context between the two outer anchor points
                         for offset, idx in enumerate(ctx_run[1:-1], start=1):
                             prev_idx = ctx_run[offset - 1]
                             next_idx = ctx_run[offset + 1]
