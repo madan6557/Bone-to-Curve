@@ -926,6 +926,87 @@ def _eval_cubic_bezier_deriv(p0, h0, h1, p1, t):
     return d0 * (om_t ** 2) + d1 * (2.0 * om_t * t) + d2 * (t ** 2)
 
 
+def _split_segment_smooth_curvature(
+    p_prev, p0, p1, p_next,
+    cuts,
+    r0, r1, tilt0, tilt1, w0, w1,
+    hr0=None, hl1=None,
+    smooth_factor=1.0
+):
+    if cuts < 1:
+        return [], hr0, hl1
+
+    d0 = (p0 - p_prev).length
+    d1 = (p1 - p0).length
+    d2 = (p_next - p1).length
+
+    dir0 = (p0 - p_prev) / d0 if d0 > 1e-6 else (p1 - p0).normalized()
+    dir1 = (p1 - p0) / d1 if d1 > 1e-6 else Vector((0.0, 0.0, 0.0))
+    dir2 = (p_next - p1) / d2 if d2 > 1e-6 else (p1 - p0).normalized()
+
+    # If existing handles were already defined and curved, preserve their tangents
+    if hr0 is not None and (hr0 - p0).length > 1e-4:
+        t0 = (hr0 - p0) * 3.0
+    else:
+        t0 = (dir0 + dir1).normalized() * d1 if (dir0 + dir1).length > 1e-6 else (p1 - p0)
+
+    if hl1 is not None and (p1 - hl1).length > 1e-4:
+        t1 = (p1 - hl1) * 3.0
+    else:
+        t1 = (dir1 + dir2).normalized() * d1 if (dir1 + dir2).length > 1e-6 else (p1 - p0)
+
+    dt = 1.0 / (cuts + 1)
+    t_vals = [i * dt for i in range(cuts + 2)]
+
+    intermediate_points = []
+    updated_first_hr = p0 + t0 * (dt / 3.0) * smooth_factor + (p1 - p0) * (dt / 3.0) * (1.0 - smooth_factor)
+    updated_last_hl = p1 - t1 * (dt / 3.0) * smooth_factor - (p1 - p0) * (dt / 3.0) * (1.0 - smooth_factor)
+
+    for i in range(1, cuts + 1):
+        t = t_vals[i]
+
+        h00 = 2.0 * (t ** 3) - 3.0 * (t ** 2) + 1.0
+        h10 = (t ** 3) - 2.0 * (t ** 2) + t
+        h01 = -2.0 * (t ** 3) + 3.0 * (t ** 2)
+        h11 = (t ** 3) - (t ** 2)
+
+        dh00 = 6.0 * (t ** 2) - 6.0 * t
+        dh10 = 3.0 * (t ** 2) - 4.0 * t + 1.0
+        dh01 = -6.0 * (t ** 2) + 6.0 * t
+        dh11 = 3.0 * (t ** 2) - 2.0 * t
+
+        p_herm = p0 * h00 + t0 * h10 + p1 * h01 + t1 * h11
+        p_lin = p0.lerp(p1, t)
+        pos = p_lin.lerp(p_herm, smooth_factor)
+
+        deriv_herm = p0 * dh00 + t0 * dh10 + p1 * dh01 + t1 * dh11
+        deriv_lin = p1 - p0
+        deriv = deriv_lin.lerp(deriv_herm, smooth_factor)
+
+        h_left = pos - deriv * (dt / 3.0)
+        h_right = pos + deriv * (dt / 3.0)
+
+        radius = r0 + (r1 - r0) * t
+        tilt = _interpolate_tilt(tilt0, tilt1, t)
+        softbody = w0 + (w1 - w0) * t
+
+        intermediate_points.append({
+            "co": pos,
+            "handle_left": h_left,
+            "handle_right": h_right,
+            "handle_left_type": "FREE",
+            "handle_right_type": "FREE",
+            "tilt": tilt,
+            "radius": radius,
+            "weight_softbody": softbody,
+            "select_control_point": True,
+            "select_left_handle": True,
+            "select_right_handle": True,
+        })
+
+    return intermediate_points, updated_first_hr, updated_last_hl
+
+
 def _split_bezier_segment_de_casteljau(p0, hr0, hl1, p1, cuts, r0, r1, tilt0, tilt1, w0, w1):
     if cuts < 1:
         return [], hr0.copy(), hl1.copy()
@@ -2289,8 +2370,15 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
                 w0 = states[index]["weight_softbody"]
                 w1 = states[index + 1]["weight_softbody"]
 
-                sub_pts, new_hr0, new_hl1 = _split_bezier_segment_de_casteljau(
-                    p0, hr0, hl1, p1, cuts, r0, r1, t0, t1, w0, w1
+                p_prev = states[index - 1]["co"] if index > 0 else p0 - (p1 - p0)
+                p_next = states[index + 2]["co"] if index + 2 < point_count else p1 + (p1 - p0)
+
+                sub_pts, new_hr0, new_hl1 = _split_segment_smooth_curvature(
+                    p_prev, p0, p1, p_next,
+                    cuts,
+                    r0, r1, t0, t1, w0, w1,
+                    hr0=hr0, hl1=hl1,
+                    smooth_factor=1.0,
                 )
                 new_states[old_to_new[index]]["handle_right"] = new_hr0
                 new_states[old_to_new[index]]["handle_right_type"] = "FREE"
@@ -2305,7 +2393,7 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
         expanded_runs = [list(range(old_to_new[run[0]], old_to_new[run[-1]] + 1)) for run in selected_runs]
         changed_count = len(new_states) - len(states)
 
-        if distribution_mode != "NONE":
+        if distribution_mode not in ("NONE", "CURVE"):
             for run in expanded_runs:
                 changed_count += _apply_segment_distribution(
                     context,
