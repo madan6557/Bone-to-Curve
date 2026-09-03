@@ -2505,6 +2505,35 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
         expanded_runs = [list(range(old_to_new[run[0]], old_to_new[run[-1]] + 1)) for run in selected_runs]
         changed_count = len(new_states) - len(states)
 
+        settings = context.scene.curve_toolkit if context and hasattr(context.scene, "curve_toolkit") else None
+        auto_smooth = getattr(settings, "subdivide_auto_smooth", True) if settings else True
+        smooth_factor = getattr(settings, "smooth_factor", 0.5) if settings else 0.5
+        smooth_steps = getattr(settings, "smooth_steps", 2) if settings else 2
+
+        if auto_smooth:
+            total_pts = _control_point_count(spline)
+            for run in expanded_runs:
+                # Expand run to include immediate neighbors for smooth curvature continuity
+                ctx_start = max(0, run[0] - 1)
+                ctx_end = min(total_pts - 1, run[-1] + 1)
+                ctx_run = list(range(ctx_start, ctx_end + 1))
+                if len(ctx_run) >= 3:
+                    points = list(_spline_points(spline))
+                    positions = [_point_local_co(point, spline) for point in points]
+                    run_positions = {idx: positions[idx] for idx in ctx_run}
+                    for _ in range(smooth_steps):
+                        next_pos = dict(run_positions)
+                        for offset, idx in enumerate(ctx_run[1:-1], start=1):
+                            prev_idx = ctx_run[offset - 1]
+                            next_idx = ctx_run[offset + 1]
+                            target = (run_positions[prev_idx] + run_positions[next_idx]) * 0.5
+                            next_pos[idx] = run_positions[idx] + (target - run_positions[idx]) * smooth_factor
+                        run_positions = next_pos
+                    for idx in ctx_run[1:-1]:
+                        _set_point_local_co(points[idx], spline, run_positions[idx])
+                    if spline.type == "BEZIER":
+                        _reset_bezier_handles_for_indices(spline, set(ctx_run))
+
         if distribution_mode not in ("NONE", "CURVE"):
             for run in expanded_runs:
                 changed_count += _apply_segment_distribution(
@@ -7734,6 +7763,7 @@ class CTK_PT_tools(bpy.types.Panel):
             segment_column.separator()
             segment_column.separator()
             segment_column.label(text="Subdivide")
+            segment_column.prop(settings, "subdivide_auto_smooth")
             segment_column.prop(settings, "subdivide_cuts")
             segment_column.prop(settings, "subdivide_distribution")
             bias_row = segment_column.row(align=True)
