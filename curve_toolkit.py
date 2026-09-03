@@ -1818,6 +1818,8 @@ def _curve_state_from_point(point):
 
 
 def _set_bezier_state(point, state):
+    point.handle_left_type = "FREE"
+    point.handle_right_type = "FREE"
     point.co = state["co"]
     point.handle_left = state["handle_left"]
     point.handle_right = state["handle_right"]
@@ -2291,7 +2293,9 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
                     p0, hr0, hl1, p1, cuts, r0, r1, t0, t1, w0, w1
                 )
                 new_states[old_to_new[index]]["handle_right"] = new_hr0
+                new_states[old_to_new[index]]["handle_right_type"] = "FREE"
                 states[index + 1]["handle_left"] = new_hl1
+                states[index + 1]["handle_left_type"] = "FREE"
                 new_states.extend(sub_pts)
 
         if len(new_states) == len(states):
