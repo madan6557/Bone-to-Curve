@@ -2413,14 +2413,24 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
                     s_end = _fallback_node_distance(total_length, point_count, index + 1)
 
                 seg_dists = [s_start + (s_end - s_start) * i / (cuts + 1) for i in range(cuts + 2)]
-                
-                # Positions & Tangents in world space along original drawn path
+
+                # World positions and tangents sampled directly from original drawn path
                 world_positions = [_point_at_distance(path_points, d) for d in seg_dists]
                 world_tangents = [_path_tangent_at_distance(path_points, d) for d in seg_dists]
                 local_positions = [matrix_inv @ wp for wp in world_positions]
                 local_tangents = [(matrix_inv.to_3x3() @ wt).normalized() for wt in world_tangents]
 
-                # Update start point right handle
+                # Reposition the start point (P_i) to exact drawn-path position (moves original point down)
+                new_states[old_to_new[index]]["co"] = local_positions[0]
+
+                # Update left handle of start point to stay aligned with path tangent
+                if index > 0:
+                    prev_dist = _path_distance_for_segment(control_distances, index - 1, total_length, point_count)
+                    ds_left = max(0.0, s_start - prev_dist)
+                    new_states[old_to_new[index]]["handle_left"] = local_positions[0] - local_tangents[0] * (ds_left / 3.0)
+                    new_states[old_to_new[index]]["handle_left_type"] = "FREE"
+
+                # Fit right handle of start point to first sub-segment
                 samples_first = [
                     matrix_inv @ _point_at_distance(path_points, seg_dists[0] + (seg_dists[1] - seg_dists[0]) * (j + 1) / 6.0)
                     for j in range(5)
@@ -2474,8 +2484,18 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
                     })
                     prev_h_left = next_h_left
 
+                # Reposition the end point (P_{i+1}) to exact drawn-path position (moves original point down)
+                states[index + 1]["co"] = local_positions[-1]
                 states[index + 1]["handle_left"] = prev_h_left
                 states[index + 1]["handle_left_type"] = "FREE"
+
+                # Update right handle of end point to stay aligned with path tangent
+                if index + 2 < point_count:
+                    next_dist = _path_distance_for_segment(control_distances, index + 2, total_length, point_count)
+                    ds_right = max(0.0, next_dist - s_end)
+                    states[index + 1]["handle_right"] = local_positions[-1] + local_tangents[-1] * (ds_right / 3.0)
+                    states[index + 1]["handle_right_type"] = "FREE"
+
                 new_states.extend(sub_pts)
 
         if len(new_states) == len(states):
