@@ -2527,33 +2527,37 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
 
         settings = context.scene.curve_toolkit if context and hasattr(context.scene, "curve_toolkit") else None
         auto_smooth = getattr(settings, "subdivide_auto_smooth", True) if settings else True
-        smooth_factor = getattr(settings, "smooth_factor", 0.5) if settings else 0.5
-        smooth_steps = getattr(settings, "smooth_steps", 2) if settings else 2
+        smooth_factor = getattr(settings, "subdivide_smooth_factor", 0.5) if settings else 0.5
 
-        if auto_smooth:
+        if auto_smooth and len(path_points) >= 2:
             total_pts = _control_point_count(spline)
+            matrix_world = curve_obj.matrix_world
+            matrix_inv = matrix_world.inverted()
+            bz_points = list(_spline_points(spline))
             for run in expanded_runs:
                 # Include outside boundary neighbors (P_0 - 1 and P_n + 1) for seamless transition
                 ctx_start = max(0, run[0] - 1)
                 ctx_end = min(total_pts - 1, run[-1] + 1)
                 ctx_run = list(range(ctx_start, ctx_end + 1))
-                if len(ctx_run) >= 3:
-                    points = list(_spline_points(spline))
-                    positions = [_point_local_co(point, spline) for point in points]
-                    run_positions = {idx: positions[idx] for idx in ctx_run}
-                    for _ in range(smooth_steps):
-                        next_pos = dict(run_positions)
-                        # Smooth all points in selection context between the two outer anchor points
-                        for offset, idx in enumerate(ctx_run[1:-1], start=1):
-                            prev_idx = ctx_run[offset - 1]
-                            next_idx = ctx_run[offset + 1]
-                            target = (run_positions[prev_idx] + run_positions[next_idx]) * 0.5
-                            next_pos[idx] = run_positions[idx] + (target - run_positions[idx]) * smooth_factor
-                        run_positions = next_pos
-                    for idx in ctx_run[1:-1]:
-                        _set_point_local_co(points[idx], spline, run_positions[idx])
-                    if spline.type == "BEZIER":
-                        _reset_bezier_handles_for_indices(spline, set(ctx_run))
+                if len(ctx_run) < 3:
+                    continue
+                anchor_left_world = matrix_world @ _point_local_co(bz_points[ctx_run[0]], spline)
+                anchor_right_world = matrix_world @ _point_local_co(bz_points[ctx_run[-1]], spline)
+                s_left = _distance_on_path_nearest(path_points, anchor_left_world)
+                s_right = _distance_on_path_nearest(path_points, anchor_right_world)
+                if s_right <= s_left:
+                    continue
+                interior = ctx_run[1:-1]
+                count = len(interior)
+                for local_i, idx in enumerate(interior):
+                    t = (local_i + 1) / (count + 1)
+                    s = s_left + (s_right - s_left) * t
+                    world_target = _point_at_distance(path_points, s)
+                    local_target = matrix_inv @ world_target
+                    current_pos = _point_local_co(bz_points[idx], spline)
+                    blended_pos = current_pos.lerp(local_target, smooth_factor)
+                    _set_point_local_co(bz_points[idx], spline, blended_pos)
+                _reset_bezier_handles_for_indices(spline, set(ctx_run))
 
         if distribution_mode not in ("NONE", "CURVE"):
             for run in expanded_runs:
@@ -2614,6 +2618,7 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
         # ------------------------------------------------------------------
         settings = context.scene.curve_toolkit if context and hasattr(context.scene, "curve_toolkit") else None
         auto_smooth = getattr(settings, "subdivide_auto_smooth", True) if settings else True
+        smooth_factor = getattr(settings, "subdivide_smooth_factor", 0.5) if settings else 0.5
 
         if auto_smooth and len(path_points) >= 2:
             total_pts = _control_point_count(spline)
@@ -2639,15 +2644,18 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
                 if s_right <= s_left:
                     continue
 
-                # Re-position all interior points to equal arc-length on drawn path
+                # Re-position all interior points blended toward equal arc-length on drawn path
+                # smooth_factor=1.0 -> fully on drawn path; smooth_factor=0.0 -> stay at current pos
                 interior = ctx_run[1:-1]
                 count = len(interior)
                 for local_i, idx in enumerate(interior):
                     t = (local_i + 1) / (count + 1)
                     s = s_left + (s_right - s_left) * t
-                    world_pos = _point_at_distance(path_points, s)
-                    local_pos = matrix_inv @ world_pos
-                    _set_point_local_co(new_points[idx], spline, local_pos)
+                    world_target = _point_at_distance(path_points, s)
+                    local_target = matrix_inv @ world_target
+                    current_pos = _point_local_co(new_points[idx], spline)
+                    blended_pos = current_pos.lerp(local_target, smooth_factor)
+                    _set_point_local_co(new_points[idx], spline, blended_pos)
 
         if distribution_mode != "NONE":
             for run in expanded_runs:
@@ -4886,6 +4894,26 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
         min=1,
         max=16,
         update=_update_segment_subdivide_preview,
+    )
+
+    subdivide_auto_smooth: BoolProperty(
+        name="Auto Smooth",
+        description="After subdivision, refit control points onto the drawn path to eliminate valleys",
+        default=True,
+    )
+
+    subdivide_smooth_factor: FloatProperty(
+        name="Smooth Factor",
+        description=(
+            "How strongly points are pulled toward the drawn path during subdivision. "
+            "1.0 = fully snapped to drawn path; 0.0 = no movement (keeps original positions)"
+        ),
+        default=0.5,
+        min=0.0,
+        max=1.0,
+        step=1,
+        precision=2,
+        subtype="FACTOR",
     )
 
     decimate_factor: FloatProperty(
@@ -7826,8 +7854,11 @@ class CTK_PT_tools(bpy.types.Panel):
             segment_column.separator()
             segment_column.separator()
             segment_column.label(text="Subdivide")
-            segment_column.prop(settings, "subdivide_auto_smooth")
+            smooth_row = segment_column.row(align=True)
+            smooth_row.prop(settings, "subdivide_auto_smooth")
             segment_column.prop(settings, "subdivide_cuts")
+            if settings.subdivide_auto_smooth:
+                segment_column.prop(settings, "subdivide_smooth_factor", slider=True)
             segment_column.prop(settings, "subdivide_distribution")
             bias_row = segment_column.row(align=True)
             bias_row.enabled = settings.subdivide_distribution == "CURVE"
