@@ -2372,6 +2372,19 @@ def _path_distance_for_segment(distances, segment_index, fallback_total, fallbac
     return _fallback_node_distance(fallback_total, fallback_count, segment_index)
 
 
+def _calculate_falloff_weight(local_i, count, falloff_type):
+    if falloff_type == "CONSTANT" or count <= 1:
+        return 1.0
+    t_norm = (local_i + 1) / (count + 1)
+    dist = min(t_norm, 1.0 - t_norm) * 2.0  # normalized distance to nearest boundary in [0, 1]
+    if falloff_type == "LINEAR":
+        return dist
+    elif falloff_type == "SMOOTH":
+        # Hermite smoothstep S-curve (3x^2 - 2x^3)
+        return dist * dist * (3.0 - 2.0 * dist)
+    return 1.0
+
+
 def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distribution_mode, curvature_bias, path_points=None):
     cuts = max(1, int(cuts))
     selected_runs = [run for run in _selected_index_runs(spline) if len(run) >= 2]
@@ -2528,6 +2541,8 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
         settings = context.scene.curve_toolkit if context and hasattr(context.scene, "curve_toolkit") else None
         auto_smooth = getattr(settings, "subdivide_auto_smooth", True) if settings else True
         smooth_factor = getattr(settings, "subdivide_smooth_factor", 0.5) if settings else 0.5
+        neighbor_range = getattr(settings, "subdivide_neighbor_range", 1) if settings else 1
+        falloff_type = getattr(settings, "subdivide_falloff", "SMOOTH") if settings else "SMOOTH"
 
         if auto_smooth and len(path_points) >= 2:
             total_pts = _control_point_count(spline)
@@ -2535,9 +2550,9 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
             matrix_inv = matrix_world.inverted()
             bz_points = list(_spline_points(spline))
             for run in expanded_runs:
-                # Include outside boundary neighbors (P_0 - 1 and P_n + 1) for seamless transition
-                ctx_start = max(0, run[0] - 1)
-                ctx_end = min(total_pts - 1, run[-1] + 1)
+                # Include outside boundary neighbors based on neighbor_range
+                ctx_start = max(0, run[0] - neighbor_range)
+                ctx_end = min(total_pts - 1, run[-1] + neighbor_range)
                 ctx_run = list(range(ctx_start, ctx_end + 1))
                 if len(ctx_run) < 3:
                     continue
@@ -2555,7 +2570,9 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
                     world_target = _point_at_distance(path_points, s)
                     local_target = matrix_inv @ world_target
                     current_pos = _point_local_co(bz_points[idx], spline)
-                    blended_pos = current_pos.lerp(local_target, smooth_factor)
+                    falloff_w = _calculate_falloff_weight(local_i, count, falloff_type)
+                    effective_factor = smooth_factor * falloff_w
+                    blended_pos = current_pos.lerp(local_target, effective_factor)
                     _set_point_local_co(bz_points[idx], spline, blended_pos)
                 _reset_bezier_handles_for_indices(spline, set(ctx_run))
 
@@ -2619,6 +2636,8 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
         settings = context.scene.curve_toolkit if context and hasattr(context.scene, "curve_toolkit") else None
         auto_smooth = getattr(settings, "subdivide_auto_smooth", True) if settings else True
         smooth_factor = getattr(settings, "subdivide_smooth_factor", 0.5) if settings else 0.5
+        neighbor_range = getattr(settings, "subdivide_neighbor_range", 1) if settings else 1
+        falloff_type = getattr(settings, "subdivide_falloff", "SMOOTH") if settings else "SMOOTH"
 
         if auto_smooth and len(path_points) >= 2:
             total_pts = _control_point_count(spline)
@@ -2627,9 +2646,9 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
             new_points = list(_spline_points(spline))
 
             for run in expanded_runs:
-                # Include one outer neighbor at each side for seamless transition
-                ctx_start = max(0, run[0] - 1)
-                ctx_end = min(total_pts - 1, run[-1] + 1)
+                # Include outside boundary neighbors based on neighbor_range
+                ctx_start = max(0, run[0] - neighbor_range)
+                ctx_end = min(total_pts - 1, run[-1] + neighbor_range)
                 ctx_run = list(range(ctx_start, ctx_end + 1))
 
                 if len(ctx_run) < 3:
@@ -2644,8 +2663,7 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
                 if s_right <= s_left:
                     continue
 
-                # Re-position all interior points blended toward equal arc-length on drawn path
-                # smooth_factor=1.0 -> fully on drawn path; smooth_factor=0.0 -> stay at current pos
+                # Re-position all interior points blended toward equal arc-length on drawn path with falloff
                 interior = ctx_run[1:-1]
                 count = len(interior)
                 for local_i, idx in enumerate(interior):
@@ -2654,7 +2672,9 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
                     world_target = _point_at_distance(path_points, s)
                     local_target = matrix_inv @ world_target
                     current_pos = _point_local_co(new_points[idx], spline)
-                    blended_pos = current_pos.lerp(local_target, smooth_factor)
+                    falloff_w = _calculate_falloff_weight(local_i, count, falloff_type)
+                    effective_factor = smooth_factor * falloff_w
+                    blended_pos = current_pos.lerp(local_target, effective_factor)
                     _set_point_local_co(new_points[idx], spline, blended_pos)
 
         if distribution_mode != "NONE":
@@ -4914,6 +4934,25 @@ class CTK_PG_settings(bpy.types.PropertyGroup):
         step=1,
         precision=2,
         subtype="FACTOR",
+    )
+
+    subdivide_neighbor_range: IntProperty(
+        name="Outer Range",
+        description="Number of outer neighbor control points included in the smoothing transition (0 = lock outer boundary)",
+        default=1,
+        min=0,
+        max=5,
+    )
+
+    subdivide_falloff: EnumProperty(
+        name="Falloff",
+        description="Transition falloff curve toward outer boundary neighbors",
+        items=(
+            ("SMOOTH", "Smooth", "Smooth S-curve / Hermite falloff"),
+            ("LINEAR", "Linear", "Linear falloff toward boundary"),
+            ("CONSTANT", "Constant", "Uniform smoothing factor across all points"),
+        ),
+        default="SMOOTH",
     )
 
     decimate_factor: FloatProperty(
@@ -7846,6 +7885,9 @@ class CTK_PT_tools(bpy.types.Panel):
             smooth_toggle_row.prop(settings, "subdivide_auto_smooth", toggle=True)
             if settings.subdivide_auto_smooth:
                 quick_box.prop(settings, "subdivide_smooth_factor", slider=True)
+                opt_row = quick_box.row(align=True)
+                opt_row.prop(settings, "subdivide_neighbor_range", text="Range")
+                opt_row.prop(settings, "subdivide_falloff", text="")
 
             segment_column.separator()
             segment_column.label(text="Raw Distribution")
@@ -7864,6 +7906,9 @@ class CTK_PT_tools(bpy.types.Panel):
             segment_column.prop(settings, "subdivide_cuts")
             if settings.subdivide_auto_smooth:
                 segment_column.prop(settings, "subdivide_smooth_factor", slider=True)
+                opt_row = segment_column.row(align=True)
+                opt_row.prop(settings, "subdivide_neighbor_range", text="Range")
+                opt_row.prop(settings, "subdivide_falloff", text="")
             segment_column.prop(settings, "subdivide_distribution")
             bias_row = segment_column.row(align=True)
             bias_row.enabled = settings.subdivide_distribution == "CURVE"
