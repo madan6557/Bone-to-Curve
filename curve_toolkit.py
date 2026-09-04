@@ -2551,30 +2551,36 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
             positions = [_point_local_co(pt, spline) for pt in bz_points]
 
             for run in expanded_runs:
-                ctx_start = max(0, run[0] - neighbor_range)
-                ctx_end = min(total_pts - 1, run[-1] + neighbor_range)
-                ctx_run = list(range(ctx_start, ctx_end + 1))
-                if len(ctx_run) < 3:
+                # Include outer neighbors as active smoothing targets.
+                # Endpoints (0 and total_pts - 1) serve as fixed anchors.
+                target_indices = [
+                    i for i in range(run[0] - neighbor_range, run[-1] + neighbor_range + 1)
+                    if 1 <= i <= total_pts - 2
+                ]
+                if not target_indices:
                     continue
 
-                interior = ctx_run[1:-1]
-                count = len(interior)
+                count = len(target_indices)
+                current_positions = [p.copy() for p in positions]
+
                 # Iterative Laplacian smooth -- same algorithm as Smooth Curve in Smooth/Reset
-                run_positions = {idx: positions[idx] for idx in ctx_run}
                 for _ in range(smooth_steps):
-                    next_positions = dict(run_positions)
-                    for local_i, idx in enumerate(interior):
-                        prev_idx = ctx_run[local_i]
-                        next_idx = ctx_run[local_i + 2]
-                        midpoint = (run_positions[prev_idx] + run_positions[next_idx]) * 0.5
+                    next_positions = [p.copy() for p in current_positions]
+                    for local_i, idx in enumerate(target_indices):
+                        midpoint = (current_positions[idx - 1] + current_positions[idx + 1]) * 0.5
                         falloff_w = _calculate_falloff_weight(local_i, count, falloff_type)
                         effective_factor = smooth_factor * falloff_w
-                        next_positions[idx] = run_positions[idx] + (midpoint - run_positions[idx]) * effective_factor
-                    run_positions = next_positions
+                        next_positions[idx] = current_positions[idx] + (midpoint - current_positions[idx]) * effective_factor
+                    current_positions = next_positions
 
-                for idx in interior:
-                    _set_point_local_co(bz_points[idx], spline, run_positions[idx])
-                _reset_bezier_handles_for_indices(spline, set(ctx_run))
+                for idx in target_indices:
+                    _set_point_local_co(bz_points[idx], spline, current_positions[idx])
+
+                handles_to_reset = set(target_indices) | {
+                    max(0, min(target_indices) - 1),
+                    min(total_pts - 1, max(target_indices) + 1)
+                }
+                _reset_bezier_handles_for_indices(spline, handles_to_reset)
 
         if distribution_mode not in ("NONE", "CURVE"):
             for run in expanded_runs:
@@ -2646,30 +2652,30 @@ def _subdivide_selected_spline_data(context, curve_obj, spline, cuts, distributi
             positions = [_point_local_co(pt, spline) for pt in new_points]
 
             for run in expanded_runs:
-                ctx_start = max(0, run[0] - neighbor_range)
-                ctx_end = min(total_pts - 1, run[-1] + neighbor_range)
-                ctx_run = list(range(ctx_start, ctx_end + 1))
-
-                if len(ctx_run) < 3:
+                # Include outer neighbors as active smoothing targets.
+                # Endpoints (0 and total_pts - 1) serve as fixed anchors.
+                target_indices = [
+                    i for i in range(run[0] - neighbor_range, run[-1] + neighbor_range + 1)
+                    if 1 <= i <= total_pts - 2
+                ]
+                if not target_indices:
                     continue
 
-                interior = ctx_run[1:-1]
-                count = len(interior)
+                count = len(target_indices)
+                current_positions = [p.copy() for p in positions]
+
                 # Iterative Laplacian smooth -- same algorithm as Smooth Curve in Smooth/Reset
-                run_positions = {idx: positions[idx] for idx in ctx_run}
                 for _ in range(smooth_steps):
-                    next_positions = dict(run_positions)
-                    for local_i, idx in enumerate(interior):
-                        prev_idx = ctx_run[local_i]
-                        next_idx = ctx_run[local_i + 2]
-                        midpoint = (run_positions[prev_idx] + run_positions[next_idx]) * 0.5
+                    next_positions = [p.copy() for p in current_positions]
+                    for local_i, idx in enumerate(target_indices):
+                        midpoint = (current_positions[idx - 1] + current_positions[idx + 1]) * 0.5
                         falloff_w = _calculate_falloff_weight(local_i, count, falloff_type)
                         effective_factor = smooth_factor * falloff_w
-                        next_positions[idx] = run_positions[idx] + (midpoint - run_positions[idx]) * effective_factor
-                    run_positions = next_positions
+                        next_positions[idx] = current_positions[idx] + (midpoint - current_positions[idx]) * effective_factor
+                    current_positions = next_positions
 
-                for idx in interior:
-                    _set_point_local_co(new_points[idx], spline, run_positions[idx])
+                for idx in target_indices:
+                    _set_point_local_co(new_points[idx], spline, current_positions[idx])
 
         if distribution_mode != "NONE":
             for run in expanded_runs:
